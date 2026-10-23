@@ -62,14 +62,20 @@ class App:
         self._connection_notice = None
         self._nodes_timer = None
         self._recover_timer = None
+        self._tick_timer = None
         self._closing = False
+        self._active_feature = None
+        self._had_window_focus = False
+        self._focus_timer = None
 
         self._build_ui()
+        self.root.bind("<FocusIn>", self._window_focus_in, add="+")
+        self.root.bind("<FocusOut>", self._window_focus_out, add="+")
         self._start_bridge()
         self.start_camera(cfg["camera"].get("default_topic", "/image_raw"))
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.root.after(100, self._tick)
+        self._tick_timer = self.root.after(100, self._tick)
         self._poll_nodes()
         self._recover_timer = self.root.after(5000, self._auto_recover)
 
@@ -95,6 +101,8 @@ class App:
             feat.build(frame)
             self.nb.add(frame, text=cls.title)
             self.features.append(feat)
+
+        self.nb.bind("<<NotebookTabChanged>>", self._tab_changed)
 
         self.log("配置：%s" % os.path.join(APP_DIR, "config", "settings.json"))
         self.log("图像模式：%s" % ("JPEG/Pillow" if HAS_PIL else "PNG/Tk 原生"))
@@ -143,7 +151,7 @@ class App:
         self.state.update(ws_connected=connected, ws_detail=detail)
         if not connected:
             self.state.update(node_count=None, battery_mv=None, pose=None, pose_seen_at=0,
-                              servo_targets={}, gripper_target=None, base_cmd=(0.0, 0.0))
+                              servo_targets={}, gripper_target=None, base_cmd=(0.0, 0.0), base_vy=0.0)
             if was_connected:
                 for feature in self.features:
                     if hasattr(feature, "stop_all"):
@@ -154,6 +162,7 @@ class App:
                 self.log("连接已断开，动作已取消；恢复连接后需手动重新发起动作")
         else:
             # 重连后只恢复状态订阅，不恢复运动或舵机动作。
+            self.ctx.stop_base()
             self.bridge.subscribe("/odom", throttle_ms=100)
             self.bridge.subscribe("/ros_robot_controller/battery", throttle_ms=1000)
             self._request_nodes()
@@ -248,7 +257,7 @@ class App:
         save_config(self.cfg)
         self.state.update(ws_connected=False, cam_size=None, node_count=None,
                           battery_mv=None, pose=None, pose_seen_at=0, servo_targets={}, gripper_target=None,
-                          base_cmd=(0.0, 0.0), ws_detail="正在连接")
+                          base_cmd=(0.0, 0.0), base_vy=0.0, ws_detail="正在连接")
         self._connection_notice = None
         self.topbar.sync_selection()
         self.log("切换小车地址：%s" % host)
@@ -350,9 +359,37 @@ class App:
         except Exception as exc:
             self.log("界面刷新异常：%s" % exc)
 
-        self.root.after(100, self._tick)
+        self._tick_timer = self.root.after(100, self._tick)
 
     # ---------------- 选项卡 ----------------
+    def _tab_changed(self, _event=None):
+        selected = self.features[self.nb.index("current")]
+        if selected is self._active_feature:
+            return
+        if self._active_feature:
+            self._active_feature.on_deactivate()
+        self._active_feature = selected
+        selected.on_activate()
+
+    def _window_focus_in(self, _event=None):
+        self._had_window_focus = True
+
+    def _window_focus_out(self, _event=None):
+        if self._focus_timer:
+            self.root.after_cancel(self._focus_timer)
+        self._focus_timer = self.root.after_idle(self._check_window_focus)
+
+    def _check_window_focus(self):
+        self._focus_timer = None
+        if self._closing or not self._had_window_focus:
+            return
+        focus = self.root.focus_get()
+        if focus is None or focus.winfo_toplevel() is not self.root:
+            self._had_window_focus = False
+            for feature in self.features:
+                if hasattr(feature, "stop_all"):
+                    feature.stop_all()
+
     def select_tab(self, key):
         """按功能 key 选中选项卡，key 找不到就保持默认。"""
         for idx, feat in enumerate(self.features):
@@ -364,7 +401,7 @@ class App:
     # ---------------- 退出 ----------------
     def on_close(self):
         self._closing = True
-        for timer in (self._nodes_timer, self._recover_timer):
+        for timer in (self._nodes_timer, self._recover_timer, self._focus_timer, self._tick_timer):
             if timer:
                 try:
                     self.root.after_cancel(timer)
@@ -388,7 +425,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description="ClawPi 小车控制台")
     ap.add_argument("--host", help="临时指定小车地址，覆盖 config/settings.json")
-    ap.add_argument("--tab", help="启动选项卡：gripper 或 terminal")
+    ap.add_argument("--tab", help="启动选项卡：gripper、remote 或 terminal")
     args = ap.parse_args(argv)
 
     cfg = load_config()

@@ -110,7 +110,7 @@ class CameraPanel(tk.Frame):
         if not cam:
             self.ctx.log("录制失败：摄像头未连接")
             return
-        if not self._recording:
+        if not cam.recording:
             path = cam.start_record(self.ctx.save_dir("预览录像"))
             self._recording = True
             self.btn_rec.config(text="停止录制", fg=theme.WARN)
@@ -139,7 +139,16 @@ class CameraPanel(tk.Frame):
 
     def on_tick(self, st):
         cam = self.ctx.app.camera
+        recording = bool(cam and cam.recording)
+        if self._recording != recording:
+            self._recording = recording
+            self.btn_rec.config(text="停止录制" if recording else "开始录制",
+                                fg=theme.WARN if recording else theme.TEXT)
         if cam is not self._camera_session or not st.get("cam_connected"):
+            if cam is not self._camera_session:
+                topic = getattr(self.ctx.app, "cam_topic", None)
+                if topic:
+                    self.var_topic.set(topic)
             self._camera_session = cam
             self._last_frame = None
             self._imgtk = None
@@ -149,9 +158,6 @@ class CameraPanel(tk.Frame):
             if not st.get("cam_connected"):
                 self._pending = None
                 return
-        if self._recording and (not cam or not cam.recording):
-            self._recording = False
-            self.btn_rec.config(text="开始录制", fg=theme.TEXT)
         if not self._pending:
             return
         ts, payload, mode = self._pending

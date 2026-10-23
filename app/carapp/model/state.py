@@ -25,6 +25,7 @@ class CarState:
             "gripper_target": None,
             "servo_targets": {},   # {"pitch": 1300, ...}
             "base_cmd": (0.0, 0.0),  # 当前底盘速度指令 (vx m/s, wz rad/s)
+            "base_vy": 0.0,         # 向左横移速度指令 m/s
             "last_action": "",
             "updated": 0.0,
         }

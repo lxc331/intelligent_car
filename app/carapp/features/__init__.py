@@ -9,11 +9,13 @@
 """
 
 from carapp.features.gripper import GripperFeature
+from carapp.features.remote import RemoteFeature
 from carapp.features.terminal import TerminalFeature
 
 FEATURES = [
     GripperFeature,
+    RemoteFeature,
     TerminalFeature,
 ]
 
-__all__ = ["FEATURES", "GripperFeature", "TerminalFeature"]
+__all__ = ["FEATURES", "GripperFeature", "RemoteFeature", "TerminalFeature"]

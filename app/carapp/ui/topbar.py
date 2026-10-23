@@ -223,10 +223,9 @@ class TopBar(tk.Frame):
 
         cmd = st.get("base_cmd") or (0.0, 0.0)
         vx, wz = float(cmd[0]), float(cmd[1])
-        if vx or wz:
-            if abs(vx) >= abs(wz):
-                self.lbl_base.config(text="vx %.2f" % vx, fg=theme.WARN)
-            else:
-                self.lbl_base.config(text="wz %.2f" % wz, fg=theme.WARN)
+        vy = float(st.get("base_vy", 0.0))
+        if vx or vy or wz:
+            axis, value = max((("vx", vx), ("vy", vy), ("wz", wz)), key=lambda p: abs(p[1]))
+            self.lbl_base.config(text="%s %.2f" % (axis, value), fg=theme.WARN)
         else:
             self.lbl_base.config(text="停", fg=theme.TEXT_DIM)

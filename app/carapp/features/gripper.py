@@ -69,14 +69,18 @@ class GripperFeature(Feature):
     # ---- 车轮 ----
     def _build_wheels(self, parent):
         box = self._section(parent, "车轮（按住方向键走，松开即停；单次最长 5 秒）")
+        controls = tk.Frame(box, bg=theme.PANEL)
+        controls.pack(fill="x")
+        extras = tk.Frame(box, bg=theme.PANEL)
+        extras.pack(fill="x")
 
-        tk.Label(box, text="速度", bg=theme.PANEL, fg=theme.TEXT_DIM,
+        tk.Label(controls, text="速度", bg=theme.PANEL, fg=theme.TEXT_DIM,
                  font=theme.FONT_SMALL).pack(side="left", padx=(0, 4))
 
         levels = list(self.base_cfg.get("speed_levels", {"慢": 0.06, "中": 0.10, "快": 0.15}).keys())
         default = self.base_cfg.get("default_level", "慢")
         self.var_level = tk.StringVar(value=default if default in levels else levels[0])
-        om = tk.OptionMenu(box, self.var_level, *levels)
+        om = tk.OptionMenu(controls, self.var_level, *levels)
         om.config(bg=theme.PANEL_2, fg=theme.TEXT, relief="flat", bd=0,
                   highlightthickness=1, highlightbackground=theme.BORDER,
                   font=theme.FONT_SMALL, width=4, anchor="center",
@@ -88,23 +92,25 @@ class GripperFeature(Feature):
         self.hold_btns = []
         for text, vx, wz in (("↑ 前进", 1, 0), ("↓ 后退", -1, 0),
                              ("← 左转", 0, 1), ("→ 右转", 0, -1)):
-            b = self._hold_btn(box, text, vx, wz)
+            b = self._hold_btn(controls, text, vx, wz)
             self.hold_btns.append(b)
 
-        self._btn(box, "■ 停止", self.stop_all, fg=theme.ERR)
+        self._btn(controls, "■ 停止", self.stop_all, fg=theme.ERR)
+        for text, sy in (("⇤ 平移左转", 1), ("平移右转 ⇥", -1)):
+            self.hold_btns.append(self._hold_btn(extras, text, 0, 0, sy=sy))
 
-        tk.Label(box, text="点动", bg=theme.PANEL, fg=theme.TEXT_DIM,
+        tk.Label(extras, text="点动", bg=theme.PANEL, fg=theme.TEXT_DIM,
                  font=theme.FONT_SMALL).pack(side="left", padx=(12, 4))
-        self._btn(box, "前 0.3s", lambda: self.nudge(1, 0, 0.3))
-        self._btn(box, "后 0.3s", lambda: self.nudge(-1, 0, 0.3))
+        self._btn(extras, "前 0.3s", lambda: self.nudge(1, 0, 0.3))
+        self._btn(extras, "后 0.3s", lambda: self.nudge(-1, 0, 0.3))
 
-    def _hold_btn(self, parent, text, vx, wz):
+    def _hold_btn(self, parent, text, vx, wz, sy=0):
         b = tk.Button(parent, text=text, bg=theme.PANEL_2, fg=theme.TEXT,
                       relief="flat", font=theme.FONT_SMALL,
                       activebackground=theme.ACCENT, activeforeground="#101010",
                       padx=10, pady=3)
         b.pack(side="left", padx=3, pady=2)
-        b.bind("<ButtonPress-1>", lambda e, a=vx, c=wz: self.jog(a, c))
+        b.bind("<ButtonPress-1>", lambda e, a=vx, c=wz, y=sy: self.jog(a, c, sy=y))
         b.bind("<ButtonRelease-1>", lambda e: self.stop_wheels())
         b.bind("<Leave>", lambda e: self.stop_wheels())
         return b
@@ -113,7 +119,10 @@ class GripperFeature(Feature):
     def _build_actions(self, parent):
         box = self._section(parent, "夹取动作（只动对应关节）")
         self.actions = self.ctx.cfg["servo"]["actions"]
-        for label, key, action, duration in (
+        rows = [tk.Frame(box, bg=theme.PANEL), tk.Frame(box, bg=theme.PANEL)]
+        for row in rows:
+            row.pack(fill="x")
+        for index, (label, key, action, duration) in enumerate((
             ("张开夹爪", "gripper", "open", 0.8),
             ("闭合夹爪", "gripper", "close", 0.8),
             ("半开夹爪", "gripper", "half_open", 0.8),
@@ -121,9 +130,9 @@ class GripperFeature(Feature):
             ("升降臂降下", "arm", "arm_down", 1.0),
             ("云台俯视", "pitch", "look_down", 1.0),
             ("云台前视", "pitch", "look_forward", 1.0),
-        ):
+        )):
             value = self.actions[action]
-            self._btn(box, "%s %d" % (label, value),
+            self._btn(rows[0 if index < 3 else 1], "%s %d" % (label, value),
                       lambda k=key, v=value, d=duration: self.send({k: v}, d))
 
     # ---- 预设 + 序列 ----
@@ -230,7 +239,7 @@ class GripperFeature(Feature):
     def _turn(self):
         return float(self.base_cfg.get("turn_speed", 0.40))
 
-    def jog(self, sx, sz):
+    def jog(self, sx, sz, *, sy=0):
         """按住方向键：起一条 10Hz 的发布线程，直到松开/超时。"""
         if self._busy:
             self.ctx.log("序列执行中，先「中止」才能手动移动")
@@ -242,6 +251,7 @@ class GripperFeature(Feature):
         ev = threading.Event()
         self._jog_evt = ev
         vx = sx * self._speed()
+        vy = sy * self._speed()
         wz = sz * self._turn()
         max_sec = float(self.base_cfg.get("jog_max_sec", 5.0))
         hz = int(self.base_cfg.get("publish_hz", 10))
@@ -253,7 +263,7 @@ class GripperFeature(Feature):
                     if time.monotonic() - t0 >= max_sec:
                         self.ctx.log("单次移动已满 %.0f 秒，自动停车" % max_sec)
                         break
-                    if not self.ctx.publish_twist(vx, wz, quiet=True):
+                    if not self.ctx.publish_twist(vx, wz, quiet=True, vy=vy):
                         break
                     ev.wait(1.0 / hz)
             finally:
@@ -261,7 +271,7 @@ class GripperFeature(Feature):
 
         self._motion_thread = threading.Thread(target=worker, daemon=True)
         self._motion_thread.start()
-        self.ctx.log("车轮：vx=%.2f m/s" % vx if vx else "车轮：wz=%.2f rad/s" % wz)
+        self.ctx.log("车轮：vx=%.2f vy=%.2f m/s，wz=%.2f rad/s" % (vx, vy, wz))
 
     def stop_wheels(self):
         if self._jog_evt is not None:
@@ -412,6 +422,9 @@ class GripperFeature(Feature):
             self.tracking.cancel()
         self.stop_wheels()
         self.ctx.log("已停止：车轮归零")
+
+    def on_deactivate(self):
+        self.stop_all()
 
     def on_close(self):
         self._abort = True

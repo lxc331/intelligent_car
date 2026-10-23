@@ -89,29 +89,36 @@ class AppContext:
         return ok
 
     # ---- 底盘运动（车轮）----
-    def publish_twist(self, vx=0.0, wz=0.0, quiet=False):
-        """vx 前进速度 m/s，wz 转向角速度 rad/s。
+    def publish_twist(self, vx=0.0, wz=0.0, quiet=False, *, vy=0.0):
+        """vx 前进、vy 向左平移（m/s），wz 向左旋转（rad/s）。
 
         话题默认 /controller/cmd_vel（geometry_msgs/Twist），
         这是车上 controller 节点订阅的那条，和手柄/APP 走同一通路。
         """
+        try:
+            vx, vy, wz = float(vx), float(vy), float(wz)
+            if not all(math.isfinite(v) for v in (vx, vy, wz)):
+                raise ValueError("底盘速度必须为有限数值")
+        except (ValueError, TypeError, OverflowError) as exc:
+            self.log("拒绝底盘指令：%s" % exc)
+            return False
         cfg = self.cfg.get("base", {})
         topic = cfg.get("topic", "/controller/cmd_vel")
         ok = self.bridge.publish(topic, {
-            "linear": {"x": float(vx), "y": 0.0, "z": 0.0},
+            "linear": {"x": vx, "y": vy, "z": 0.0},
             "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
         })
         if ok:
-            self.state.update(base_cmd=(float(vx), float(wz)))
-            if not quiet and (vx or wz):
-                self.state.update(last_action="底盘 vx=%.2f wz=%.2f" % (vx, wz))
+            self.state.update(base_cmd=(vx, wz), base_vy=vy)
+            if not quiet and (vx or vy or wz):
+                self.state.update(last_action="底盘 vx=%.2f vy=%.2f wz=%.2f" % (vx, vy, wz))
         return ok
 
     def stop_base(self):
-        """连续发三次零速，确保控制器-side 的看门狗也能收到。"""
+        """连续发三次零速；网络断开时无法保证指令送达车辆。"""
         for _ in range(3):
             self.publish_twist(0.0, 0.0, quiet=True)
-        self.state.update(base_cmd=(0.0, 0.0))
+        self.state.update(base_cmd=(0.0, 0.0), base_vy=0.0)
 
 
 class Feature:
@@ -132,3 +139,9 @@ class Feature:
 
     def on_close(self):
         """关闭程序时的清理。"""
+
+    def on_activate(self):
+        """进入本选项卡；不自动恢复动作。"""
+
+    def on_deactivate(self):
+        """离开本选项卡。"""
