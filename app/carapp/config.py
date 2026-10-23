@@ -94,6 +94,7 @@ DEFAULTS = {
         "odom_timeout": .8, "max_seconds": 45., "max_distance": .8,
         "calibrations": {},
     },
+    "terminal": {"port": 22, "username": "pi", "auto_connect": True},
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
 

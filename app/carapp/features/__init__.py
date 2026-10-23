@@ -9,9 +9,11 @@
 """
 
 from carapp.features.gripper import GripperFeature
+from carapp.features.terminal import TerminalFeature
 
 FEATURES = [
     GripperFeature,
+    TerminalFeature,
 ]
 
-__all__ = ["FEATURES", "GripperFeature"]
+__all__ = ["FEATURES", "GripperFeature", "TerminalFeature"]

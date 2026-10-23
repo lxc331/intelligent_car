@@ -1,0 +1,4 @@
+# Basic manual control also works without these optional feature dependencies.
+Pillow>=10
+paramiko>=3.4,<6
+pyte>=0.8.2,<0.9

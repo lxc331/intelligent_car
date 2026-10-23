@@ -231,6 +231,9 @@ class App:
         if any(getattr(f, "_motion_thread", None) and f._motion_thread.is_alive() for f in self.features):
             self.log("正在停止上台车的运动线程，请稍后再切换")
             return False
+        for feature in self.features:
+            if hasattr(feature,"on_vehicle_change"):
+                feature.on_vehicle_change()
         profiles = self.cfg["cars"]
         profile = next((p for p in profiles if p["id"] == profile_id), None)
         if not profile_id:
@@ -385,7 +388,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description="ClawPi 小车控制台")
     ap.add_argument("--host", help="临时指定小车地址，覆盖 config/settings.json")
-    ap.add_argument("--tab", help="启动时选中哪个选项卡（目前只有 gripper）")
+    ap.add_argument("--tab", help="启动选项卡：gripper 或 terminal")
     args = ap.parse_args(argv)
 
     cfg = load_config()

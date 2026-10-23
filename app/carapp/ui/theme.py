@@ -42,4 +42,8 @@ def style_ttk(root):
     st.configure("TCombobox", fieldbackground=PANEL_2, background=PANEL_2,
                  foreground=TEXT, arrowcolor=TEXT)
     st.configure("Horizontal.TScale", background=BG, troughcolor=PANEL_2)
+    st.configure("Treeview",background=PANEL_2,fieldbackground=PANEL_2,foreground=TEXT,
+                 rowheight=25,borderwidth=0,font=FONT_SMALL)
+    st.configure("Treeview.Heading",background=PANEL,foreground=TEXT_DIM,font=FONT_SMALL)
+    st.map("Treeview",background=[("selected","#094771")],foreground=[("selected",TEXT)])
     return st
