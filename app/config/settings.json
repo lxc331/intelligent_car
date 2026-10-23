@@ -1,0 +1,120 @@
+{
+  "car": {
+    "host": "192.168.150.2",
+    "http_port": 8080,
+    "ws_port": 9090,
+    "subnet_prefix": "192.168.150",
+    "subnet_prefixes": [
+      "192.168.150",
+      "192.168.149"
+    ]
+  },
+  "cars": [
+    {
+      "name": "1 号车",
+      "host": "192.168.150.3"
+    },
+    {
+      "name": "2 号车",
+      "host": "192.168.150.2"
+    }
+  ],
+  "base": {
+    "topic": "/controller/cmd_vel",
+    "speed_levels": {
+      "慢": 0.06,
+      "中": 0.1,
+      "快": 0.15
+    },
+    "default_level": "慢",
+    "turn_speed": 0.4,
+    "publish_hz": 10,
+    "jog_max_sec": 5.0,
+    "pick_forward_sec": 0.6,
+    "pick_backward_sec": 0.4
+  },
+  "camera": {
+    "default_topic": "/image_raw",
+    "topics": [
+      "/image_raw",
+      "/color_track_pick/image_result",
+      "/line_following/image_result",
+      "/object_tracking/image_result",
+      "/llm_control/image_result"
+    ],
+    "max_width": 860,
+    "save_dir": "捕获"
+  },
+  "servo": {
+    "ids": {
+      "pitch": 1,
+      "yaw": 2,
+      "arm": 3,
+      "gripper": 4
+    },
+    "names": {
+      "pitch": "云台俯仰",
+      "yaw": "云台水平",
+      "arm": "升降臂",
+      "gripper": "夹爪"
+    },
+    "limits": {
+      "pitch": [
+        1150,
+        2250
+      ],
+      "yaw": [
+        650,
+        2350
+      ],
+      "arm": [
+        1200,
+        2000
+      ],
+      "gripper": [
+        1500,
+        2000
+      ]
+    },
+    "actions": {
+      "open": 2000,
+      "close": 1500,
+      "half_open": 1750,
+      "arm_up": 1700,
+      "arm_down": 1200,
+      "look_down": 1300,
+      "look_forward": 1500
+    },
+    "presets": {
+      "待机（张爪）": {
+        "pitch": 1300,
+        "yaw": 1500,
+        "arm": 1200,
+        "gripper": 2000
+      },
+      "俯视观察": {
+        "pitch": 1300,
+        "yaw": 1500,
+        "arm": 1200,
+        "gripper": 2000
+      },
+      "夹取准备": {
+        "pitch": 1300,
+        "yaw": 1500,
+        "arm": 1200,
+        "gripper": 2000
+      },
+      "抬起持物": {
+        "pitch": 1300,
+        "yaw": 1500,
+        "arm": 1700,
+        "gripper": 1500
+      }
+    }
+  },
+  "status": {
+    "poll_interval": 1.0,
+    "nodes_interval": 6.0,
+    "log_lines": 300
+  }
+}

@@ -1,0 +1,16 @@
+# Vendor resources
+/ClawPi智能小车/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local agent work and generated captures
+/.work/
+/.workbuddy/
+
+# Local credentials and notes containing credentials
+/小车账号密码信息.txt
+/小车HW-10CCA58E基本信息.md
+/小车HW-A0857935基本信息.md
+/交接说明_项目上下文.md
