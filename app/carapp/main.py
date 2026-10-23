@@ -9,6 +9,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -21,6 +22,7 @@ from carapp.config import load_config, save_config  # noqa: E402
 from carapp.core.camera import CameraStream  # noqa: E402
 from carapp.core.discovery import scan as scan_net  # noqa: E402
 from carapp.core.rosbridge import RosBridge  # noqa: E402
+from carapp.core.connection import diagnose, require_wifi  # noqa: E402
 from carapp.features import FEATURES  # noqa: E402
 from carapp.features.base import AppContext  # noqa: E402
 from carapp.model.state import CarState  # noqa: E402
@@ -54,6 +56,10 @@ class App:
         self.frame_listeners = []
         self.logpanel = None
         self._log_queue = queue.Queue()
+        self._ui_queue = queue.Queue()
+        self._connection_generation = 0
+        self._scan_running = False
+        self._connection_notice = None
         self._nodes_timer = None
         self._recover_timer = None
         self._closing = False
@@ -96,30 +102,61 @@ class App:
     def log(self, msg):
         self._log_queue.put(str(msg))
 
+    def _post(self, callback, *args):
+        if not self._closing:
+            self._ui_queue.put((callback, args))
+
+    def _connection_guard(self):
+        car = self.cfg["car"]
+        if car.get("transport") == "wifi":
+            profile = next((p for p in self.cfg["cars"] if p["id"] == car.get("profile_id")), {})
+            ssid = profile.get("ssid")
+            return lambda: require_wifi(ssid)
+        return None
+
+    def _session_callback(self, generation, callback, *args):
+        if not self._closing and generation == self._connection_generation:
+            callback(*args)
+
     # ---------------- 后台连接 ----------------
     def _start_bridge(self):
         car = self.cfg["car"]
+        self._connection_generation += 1
+        generation = self._connection_generation
         if self.bridge:
             self.bridge.stop()
+        def post(callback):
+            return lambda *args: self._post(self._session_callback, generation, callback, *args)
         self.bridge = RosBridge(
             car["host"], int(car["ws_port"]),
-            on_message=self._on_ros_message,
-            on_status=self._on_ros_status,
-            log=lambda m: self.root.after(0, self.log, m),
+            on_message=post(self._on_ros_message),
+            on_status=post(self._on_ros_status),
+            log=post(self.log),
+            connection_guard=self._connection_guard(),
         )
         self.bridge.start()
 
     def _on_ros_status(self, connected, detail=""):
-        def apply():
-            if self._closing:
-                return
-            self.state.update(ws_connected=connected, ws_detail=detail)
-            if connected:
-                self.bridge.subscribe("/odom", throttle_ms=500)
-                self.bridge.subscribe("/ros_robot_controller/battery", throttle_ms=1000)
-                # 连上就立刻取一次节点数，不用等 6 秒的轮询
-                self.bridge.call_service("/rosapi/nodes", {}, self._on_nodes)
-        self.root.after(0, apply)
+        if self._closing:
+            return
+        was_connected = self.state.get("ws_connected")
+        self.state.update(ws_connected=connected, ws_detail=detail)
+        if not connected:
+            self.state.update(node_count=None, battery_mv=None, pose=None, pose_seen_at=0,
+                              servo_targets={}, gripper_target=None, base_cmd=(0.0, 0.0))
+            if was_connected:
+                for feature in self.features:
+                    if hasattr(feature, "stop_all"):
+                        feature.stop_all()
+                    tracking = getattr(feature, "tracking", None)
+                    if tracking:
+                        tracking.reset()
+                self.log("连接已断开，动作已取消；恢复连接后需手动重新发起动作")
+        else:
+            # 重连后只恢复状态订阅，不恢复运动或舵机动作。
+            self.bridge.subscribe("/odom", throttle_ms=100)
+            self.bridge.subscribe("/ros_robot_controller/battery", throttle_ms=1000)
+            self._request_nodes()
 
     def _on_ros_message(self, topic, msg):
         if not isinstance(msg, dict):
@@ -131,7 +168,7 @@ class App:
                 y = float(p["position"]["y"])
                 q = p["orientation"]
                 yaw = math.degrees(2 * math.atan2(float(q["z"]), float(q["w"])))
-                self.state.update(pose=(x, y, yaw))
+                self.state.update(pose=(x, y, yaw), pose_seen_at=time.monotonic())
             except Exception:
                 pass
         elif topic.endswith("battery"):
@@ -146,10 +183,15 @@ class App:
 
     def _poll_nodes(self):
         """单条自循环的定时链：init 时启动一次，之后自己续期。"""
-        if self.bridge:
-            self.bridge.call_service("/rosapi/nodes", {}, self._on_nodes)
+        self._request_nodes()
         self._nodes_timer = self.root.after(
             int(self.cfg["status"]["nodes_interval"] * 1000), self._poll_nodes)
+
+    def _request_nodes(self):
+        if self.bridge and self.bridge.connected:
+            generation = self._connection_generation
+            self.bridge.call_service("/rosapi/nodes", {},
+                lambda *args: self._post(self._session_callback, generation, self._on_nodes, *args))
 
     def _on_nodes(self, values, result):
         nodes = (values or {}).get("nodes") or []
@@ -161,9 +203,11 @@ class App:
         car = self.cfg["car"]
         self.cam_q = queue.Queue(maxsize=1)
         self.cam_topic = topic
+        self.state.update(cam_connected=False, cam_size=None, cam_fps=0, cam_error="等待摄像头服务")
         mode = "jpeg" if HAS_PIL else "png"
         self.camera = CameraStream(car["host"], int(car["http_port"]), topic, mode,
-                                   self.cam_q, log=lambda m: self.root.after(0, self.log, m))
+                                   self.cam_q, log=self.log,
+                                   connection_guard=self._connection_guard())
         self.camera.start()
 
     def stop_camera(self):
@@ -173,67 +217,105 @@ class App:
             self.camera = None
 
     # ---------------- 主机切换 / 自动发现 ----------------
-    def change_host(self, host):
+    def change_host(self, host, profile_id=None, transport=None):
         for feature in self.features:
             if getattr(feature, "_busy", False):
                 self.log("动作序列执行中，请先中止并等待结束后切换小车")
-                return
+                return False
         for feature in self.features:
             if hasattr(feature, "stop_all"):
                 feature.stop_all()
+            tracking = getattr(feature, "tracking", None)
+            if tracking:
+                tracking.reset()
+        if any(getattr(f, "_motion_thread", None) and f._motion_thread.is_alive() for f in self.features):
+            self.log("正在停止上台车的运动线程，请稍后再切换")
+            return False
+        profiles = self.cfg["cars"]
+        profile = next((p for p in profiles if p["id"] == profile_id), None)
+        if not profile_id:
+            profile = next((p for p in profiles if p.get("host") == host), None)
+        transport = transport or ("wifi" if host == "192.168.149.1" else "wired")
+        if transport == "wifi" and not profile:
+            self.log("两车热点地址相同，请先选好车辆，再选择 Wi-Fi 热点连接")
+            return False
+        self.cfg["car"]["profile_id"] = profile["id"] if profile else ""
+        self.cfg["car"]["transport"] = transport
         self.cfg["car"]["host"] = host
         save_config(self.cfg)
         self.state.update(ws_connected=False, cam_size=None, node_count=None,
-                          battery_mv=None, pose=None, servo_targets={}, gripper_target=None)
+                          battery_mv=None, pose=None, pose_seen_at=0, servo_targets={}, gripper_target=None,
+                          base_cmd=(0.0, 0.0), ws_detail="正在连接")
+        self._connection_notice = None
+        self.topbar.sync_selection()
         self.log("切换小车地址：%s" % host)
         self._start_bridge()
         self.start_camera(self.cam_topic or self.cfg["camera"]["default_topic"])
+        return True
 
     def discover_car(self, callback):
+        if self._scan_running:
+            return
+        self._scan_running = True
+        generation = self._connection_generation
         # 两条接入路径都要扫：网线 192.168.150.x、车自己发的 WiFi 热点 192.168.149.x
         prefixes = self.cfg["car"].get("subnet_prefixes")
         if not prefixes:
             prefixes = [self.cfg["car"].get("subnet_prefix", "192.168.150"), "192.168.149"]
 
         def worker():
-            found = scan_net(prefixes)
-            self.root.after(0, callback, found)
+            try:
+                found = scan_net(prefixes, http_port=int(self.cfg["car"]["http_port"]),
+                                 ws_port=int(self.cfg["car"]["ws_port"]),
+                                 cancel=lambda: self._closing)
+            except Exception as exc:
+                self.log("搜索失败：%s" % exc)
+                found = []
+            self._post(done, found)
+        def done(found):
+            self._scan_running = False
+            if generation != self._connection_generation:
+                self.topbar.btn_scan.config(state="normal", text="自动搜索")
+                self.log("搜索期间已切换车辆，已忽略旧搜索结果")
+                return
+            callback(found)
         threading.Thread(target=worker, daemon=True).start()
 
     def _auto_recover(self):
-        """启动 5 秒还没连上，就自己扫一遍：只找到一台就切过去。
-
-        为什么需要：两台同款车换着用时，最容易犯的错就是"插的是 2 号车、下拉还停在 1 号车"。
-        """
-        if self.state.get("ws_connected"):
+        """持续显示就绪状态；各连接线程持续重试当前车辆，禁止自动换车。"""
+        if self._closing:
             return
-        self.log("启动后仍未连接，自动搜索在线的小车…")
+        ready = (self.state.get("ws_connected"), self.state.get("cam_connected"))
+        if ready != self._connection_notice:
+            self._connection_notice = ready
+            if ready == (True, True):
+                self.log("ROS 与画面均已就绪")
+            else:
+                self.log("正在等待当前车辆的%s，连接会持续重试；可点「连接诊断」查看网段和服务状态" %
+                         ("ROS 和画面" if not any(ready) else ("画面" if ready[0] else "ROS")))
+        self._recover_timer = self.root.after(5000, self._auto_recover)
 
-        def done(found):
-            if not found:
-                self.log("未搜到小车：确认网线插好，且本机在 192.168.150.x 或 192.168.149.x 网段")
-                return
-            if len(found) > 1:
-                self.log("搜到 %d 台（%s），请在左上角下拉里选一台" % (len(found), "、".join(found)))
-                return
-            host = found[0]
-            if host == self.cfg["car"]["host"]:
-                self.log("小车 %s 在线，但 ROS 服务未就绪（可能还在开机，等 40~60 秒）" % host)
-                return
-            self.log("自动切换到在线的小车：%s" % host)
-            topbar = getattr(self, "topbar", None)
-            if topbar is not None:
-                topbar.var_host.set(host)
-                for c in (self.cfg.get("cars") or []):
-                    if c.get("host") == host and hasattr(topbar, "var_car"):
-                        topbar.var_car.set(c.get("name") or host)
-                        break
-            self.change_host(host)
-
-        self.discover_car(done)
+    def diagnose_connection(self, callback):
+        import copy
+        car, profiles = copy.deepcopy(self.cfg["car"]), copy.deepcopy(self.cfg["cars"])
+        def worker():
+            try:
+                report = diagnose(car, profiles)
+            except Exception as exc:
+                report = "诊断失败：%s" % exc
+            self._post(callback, report)
+        threading.Thread(target=worker, name="connection-diagnostics", daemon=True).start()
 
     # ---------------- 主循环 ----------------
     def _tick(self):
+        if self._closing:
+            return
+        while not self._ui_queue.empty():
+            callback, args = self._ui_queue.get_nowait()
+            try:
+                callback(*args)
+            except Exception as exc:
+                self.log("连接事件处理失败：%s" % exc)
         while not self._log_queue.empty():
             try:
                 self.logpanel.add(self._log_queue.get_nowait())
@@ -248,10 +330,14 @@ class App:
                     cb(ts, payload, mode)
                 except Exception:
                     pass
-            if self.camera:
-                self.state.update(cam_fps=self.camera.fps(), cam_size=self.camera.size)
         except queue.Empty:
             pass
+
+        if self.camera:
+            fresh = self.camera.connected and time.monotonic() - self.camera.last_frame_at < 3
+            self.state.update(cam_connected=fresh, cam_error=self.camera.last_error or "等待新画面",
+                              cam_fps=self.camera.fps() if fresh else 0,
+                              cam_size=self.camera.size if fresh else None)
 
         st = self.state.snapshot()
         try:
@@ -305,6 +391,10 @@ def main(argv=None):
     cfg = load_config()
     if args.host:
         cfg["car"]["host"] = args.host
+        cfg["car"]["transport"] = "wifi" if args.host == "192.168.149.1" else "wired"
+        if cfg["car"]["transport"] == "wired":
+            profile = next((p for p in cfg["cars"] if p["host"] == args.host), {})
+            cfg["car"]["profile_id"] = profile.get("id", "")
 
     app = App(cfg)
     if args.tab:

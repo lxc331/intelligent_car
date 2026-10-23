@@ -21,6 +21,7 @@ import tkinter as tk
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.camerapanel import CameraPanel
+from carapp.features.tracking_pick import TrackingPickControls
 
 
 class GripperFeature(Feature):
@@ -36,6 +37,7 @@ class GripperFeature(Feature):
         self._jog_evt = None        # 当前点动线程停止事件
         self._jog_dir = None
         self._motion_thread = None
+        self.tracking = None
 
     # ---------- 界面 ----------
     def build(self, parent):
@@ -58,6 +60,7 @@ class GripperFeature(Feature):
         self._build_wheels(left)
         self._build_actions(left)
         self._build_presets(left)
+        self.tracking = TrackingPickControls(left, self)
         self._build_sliders(right)
 
         self.cam = CameraPanel(parent, self.ctx)
@@ -151,7 +154,7 @@ class GripperFeature(Feature):
         tk.Label(row, text="秒", bg=theme.PANEL, fg=theme.TEXT_DIM,
                  font=theme.FONT_SMALL).pack(side="left", padx=(2, 10))
 
-        self._btn(row, "一键夹取（车轮配合）", self.run_pick_sequence, fg=theme.ACCENT)
+        self._btn(row, "定时夹取（原模式）", self.run_pick_sequence, fg=theme.ACCENT)
         self._btn(row, "中止", self.abort_sequence, fg=theme.ERR)
 
     # ---- 滑杆 ----
@@ -331,6 +334,8 @@ class GripperFeature(Feature):
     # ---------- 序列 ----------
     def abort_sequence(self):
         self._abort = True
+        if self.tracking:
+            self.tracking.cancel()
         self.stop_wheels()
         self.ctx.log("已发出中止，车轮已停")
 
@@ -392,6 +397,8 @@ class GripperFeature(Feature):
 
     # ---------- 刷新 ----------
     def on_tick(self, st):
+        if self.tracking:
+            self.tracking.tick(st)
         targets = st.get("servo_targets") or {}
         if targets:
             text = "  ".join("%s=%s" % (self.names.get(k, k), v)
@@ -401,11 +408,15 @@ class GripperFeature(Feature):
 
     def stop_all(self):
         self._abort = True
+        if self.tracking:
+            self.tracking.cancel()
         self.stop_wheels()
         self.ctx.log("已停止：车轮归零")
 
     def on_close(self):
         self._abort = True
+        if self.tracking:
+            self.tracking.close()
         try:
             self.stop_wheels()
         except Exception:

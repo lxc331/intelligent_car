@@ -50,7 +50,8 @@ def parse_size(payload, mode):
 
 
 class CameraStream(threading.Thread):
-    def __init__(self, host, http_port, topic, mode, frame_q, log=None):
+    RETRY_SECONDS = 3
+    def __init__(self, host, http_port, topic, mode, frame_q, log=None, connection_guard=None):
         super().__init__(daemon=True, name="camera")
         self.host = host
         self.http_port = http_port
@@ -58,6 +59,7 @@ class CameraStream(threading.Thread):
         self.mode = mode
         self.frame_q = frame_q
         self.log = log or (lambda text: None)
+        self.connection_guard = connection_guard
 
         self.url = "http://%s:%d/stream?topic=%s&type=%s" % (
             host, http_port, topic, "mjpeg" if mode == "jpeg" else "png")
@@ -74,6 +76,8 @@ class CameraStream(threading.Thread):
         self.t0 = time.time()
         self.size = None
         self.last_error = None
+        self.connected = False
+        self.last_frame_at = 0.0
 
     # ---------- 统计 ----------
     def fps(self):
@@ -89,6 +93,8 @@ class CameraStream(threading.Thread):
         os.makedirs(outdir, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         with self._lock:
+            if self._rec_dir is not None:
+                return self._rec_dir
             if self.mode == "jpeg":
                 path = os.path.join(outdir, "预览录像_%s.mjpg" % stamp)
                 self._rec_fp = open(path, "wb")
@@ -118,37 +124,47 @@ class CameraStream(threading.Thread):
     # ---------- 主循环 ----------
     def run(self):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        try:
-            req = urllib.request.Request(self.url, headers={"User-Agent": "carapp"})
-            self._resp = opener.open(req, timeout=8)
-        except Exception as exc:
-            self.last_error = "连不上摄像头：%s" % exc
-            self.log(self.last_error)
-            return
-
-        self.log("摄像头已连接 %s" % self.url)
-        buf = bytearray()
         while not self._halt.is_set():
             try:
-                chunk = self._resp.read(8192)
-            except Exception as exc:
-                self.last_error = "读流中断：%s" % exc
-                break
-            if not chunk:
-                self.last_error = "流已结束"
-                break
-            buf.extend(chunk)
-
-            while True:
-                frame = self._cut_frame(buf)
-                if not frame:
+                if self.connection_guard:
+                    self.connection_guard()
+                req = urllib.request.Request(self.url, headers={"User-Agent": "carapp"})
+                response = opener.open(req, timeout=8)
+                self._resp = response
+                if self._halt.is_set():
                     break
-                self._deliver(frame)
-
-        try:
-            self._resp.close()
-        except Exception:
-            pass
+                self.log("摄像头已连接 %s" % self.url)
+                self.frames = self.bytes = 0
+                self.t0 = time.time()
+                self.size = None
+                buf = bytearray()
+                checked = time.monotonic()
+                while not self._halt.is_set():
+                    if self.connection_guard and time.monotonic() - checked >= 4:
+                        self.connection_guard()
+                        checked = time.monotonic()
+                    chunk = response.read1(8192)
+                    if not chunk:
+                        raise ConnectionError("流已结束")
+                    buf.extend(chunk)
+                    while True:
+                        frame = self._cut_frame(buf)
+                        if not frame:
+                            break
+                        self._deliver(frame)
+            except Exception as exc:
+                self.last_error = "摄像头连接中断：%s" % exc
+                if not self._halt.is_set():
+                    self.log(self.last_error + "，3 秒后重连")
+            finally:
+                self.connected = False
+                if self._resp:
+                    try:
+                        self._resp.close()
+                    except Exception:
+                        pass
+                self._resp = None
+            self._halt.wait(self.RETRY_SECONDS)
         self.stop_record()
 
     def _cut_frame(self, buf):
@@ -183,6 +199,11 @@ class CameraStream(threading.Thread):
         return data
 
     def _deliver(self, payload):
+        if self._halt.is_set():
+            return
+        self.connected = True
+        self.last_error = None
+        self.last_frame_at = time.monotonic()
         self.frames += 1
         self.bytes += len(payload)
         if self.size is None:
@@ -213,8 +234,13 @@ class CameraStream(threading.Thread):
 
     def stop(self):
         self._halt.set()
-        try:
-            if self._resp:
-                self._resp.close()
-        except Exception:
-            pass
+        self.connected = False
+        response = self._resp
+        if response:
+            # HTTPResponse.close 可能等待阻塞读取结束，不阻塞 Tk 主线程。
+            def close_response():
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            threading.Thread(target=close_response, daemon=True).start()

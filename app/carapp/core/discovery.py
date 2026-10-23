@@ -26,12 +26,14 @@ def _probe(ip, port, timeout=0.25):
             pass
 
 
-def _looks_like_car(ip):
+def _looks_like_car(ip, http_port=HTTP_PORT, ws_port=WS_PORT):
     """8080 开 + 9090 开，基本就是这台车（rosbridge + web_video_server）。"""
-    return _probe(ip, HTTP_PORT) and _probe(ip, WS_PORT, timeout=0.4)
+    # 任一服务先起来时也列为候选，由用户选择；端口不能用于推断车辆身份。
+    return _probe(ip, http_port) or _probe(ip, ws_port, timeout=0.4)
 
 
-def scan(subnet_prefix="192.168.150", hosts=254, on_progress=None, cancel=None):
+def scan(subnet_prefix="192.168.150", hosts=254, on_progress=None, cancel=None,
+         http_port=HTTP_PORT, ws_port=WS_PORT):
     """返回找到的 IP 列表（通常只有一个）。
 
     subnet_prefix 可以是单个前缀字符串，也可以是前缀列表 ——
@@ -49,7 +51,7 @@ def scan(subnet_prefix="192.168.150", hosts=254, on_progress=None, cancel=None):
     total = len(ips)
     # 列表里有多个网段时，先探"当前已连上的网段"更省时间：靠前的 prefix 优先并发
     with concurrent.futures.ThreadPoolExecutor(max_workers=96) as pool:
-        futures = {pool.submit(_looks_like_car, ip): ip for ip in ips}
+        futures = {pool.submit(_looks_like_car, ip, http_port, ws_port): ip for ip in ips}
         for fut in concurrent.futures.as_completed(futures):
             done += 1
             if cancel is not None and cancel():

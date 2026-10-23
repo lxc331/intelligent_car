@@ -17,12 +17,18 @@ from carapp.core.ws import WebSocket
 
 
 class RosBridge:
-    def __init__(self, host, port=9090, on_message=None, on_status=None, log=None):
+    RETRY_SECONDS = 3
+    HEARTBEAT_SECONDS = 4
+    DEAD_SECONDS = 12
+    WATCHDOG_SECONDS = 1
+    def __init__(self, host, port=9090, on_message=None, on_status=None, log=None,
+                 connection_guard=None):
         self.host = host
         self.port = port
         self.on_message = on_message or (lambda topic, msg: None)
         self.on_status = on_status or (lambda connected, detail="": None)
         self.log = log or (lambda text: None)
+        self.connection_guard = connection_guard
 
         self._ws = None
         self._lock = threading.Lock()
@@ -63,14 +69,20 @@ class RosBridge:
         self._svc_seq += 1
         sid = "srv-%d" % self._svc_seq
         if callback:
-            self._svc_waiters[sid] = callback
-        return self._send({"op": "call_service", "id": sid, "service": service,
+            self._svc_waiters[sid] = (time.monotonic(), callback)
+        sent = self._send({"op": "call_service", "id": sid, "service": service,
                            "args": args or {}})
+        if not sent:
+            self._svc_waiters.pop(sid, None)
+        for key, (created, _) in list(self._svc_waiters.items()):
+            if time.monotonic() - created > 15:
+                self._svc_waiters.pop(key, None)
+        return sent
 
     # ---------- 内部 ----------
     def _send(self, obj):
         with self._lock:
-            if not self._ws:
+            if not self._ws or not self._connected or self._stop.is_set():
                 return False
             try:
                 self._ws.send_text(json.dumps(obj))
@@ -83,6 +95,7 @@ class RosBridge:
             if self._ws:
                 self._ws.close()
             self._ws = None
+        self._svc_waiters.clear()
         if self._connected:
             self._connected = False
             self.on_status(False, "连接已断开")
@@ -94,29 +107,57 @@ class RosBridge:
 
     def _run(self):
         while not self._stop.is_set():
+            heartbeat_done = threading.Event()
             try:
+                if self.connection_guard:
+                    self.connection_guard()
                 ws = WebSocket(self.host, self.port, timeout=6)
                 with self._lock:
+                    if self._stop.is_set():
+                        ws.close()
+                        return
                     self._ws = ws
                 self._set_connected(True, "ws://%s:%d" % (self.host, self.port))
                 self.log("已连接 rosbridge ws://%s:%d" % (self.host, self.port))
                 # 重连后把之前的订阅补回来
-                for topic, throttle in self._subs.items():
+                for topic, throttle in list(self._subs.items()):
                     payload = {"op": "subscribe", "topic": topic}
                     if throttle:
                         payload["throttle_rate"] = throttle
                     ws.send_text(json.dumps(payload))
                 ws.sock.settimeout(None)
+                threading.Thread(target=self._heartbeat, args=(ws, heartbeat_done),
+                                 name="ros-heartbeat", daemon=True).start()
                 while not self._stop.is_set():
                     raw = ws.recv_text()
                     if raw:
                         self._dispatch(raw)
             except Exception as exc:
                 self._set_connected(False, str(exc))
-                self.log("rosbridge 断开：%s，3 秒后重连" % exc)
-                time.sleep(3)
+                if not self._stop.is_set():
+                    self.log("rosbridge 断开：%s，3 秒后重连" % exc)
             finally:
+                heartbeat_done.set()
                 self._close()
+            self._stop.wait(self.RETRY_SECONDS)
+
+    def _heartbeat(self, ws, done):
+        """有线拔插/断电可能不产生 TCP EOF，用 ping/pong 检测失活。"""
+        last_ping = 0.0
+        while not done.wait(self.WATCHDOG_SECONDS) and not self._stop.is_set():
+            now = time.monotonic()
+            if now - ws.last_received > self.DEAD_SECONDS:
+                ws.close()
+                return
+            if now - last_ping >= self.HEARTBEAT_SECONDS:
+                try:
+                    if self.connection_guard:
+                        self.connection_guard()
+                    ws.ping()
+                    last_ping = now
+                except Exception:
+                    ws.close()
+                    return
 
     def _dispatch(self, raw):
         try:
@@ -128,9 +169,10 @@ class RosBridge:
             topic = data.get("topic", "")
             self.on_message(topic, data.get("msg"))
         elif op == "service_response":
-            cb = self._svc_waiters.pop(data.get("id"), None)
-            if cb:
+            waiter = self._svc_waiters.pop(data.get("id"), None)
+            if waiter:
                 try:
+                    _, cb = waiter
                     cb(data.get("values", {}), data.get("result"))
                 except Exception:
                     pass

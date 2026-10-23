@@ -31,11 +31,12 @@ DEFAULTS = {
         "subnet_prefixes": ["192.168.150", "192.168.149"],
     },
     # 多车档案：顶部下拉一键切换。host 是"当前使用"的地址，由切换动作更新。
-    # 注意：同款车出厂都是 192.168.150.3，同时接两条网线会 IP 冲突，
-    # 必须给其中一台改静态地址（见 README「多台车怎么用」）。
+    # 按两台车采集文档记录的 NetworkManager 持久地址配置。
     "cars": [
-        {"name": "1 号车", "host": "192.168.150.3"},
-        {"name": "2 号车", "host": "192.168.150.2"},
+        {"id": "HW-10CCA58E", "name": "1 号车", "host": "192.168.150.3",
+         "wifi_host": "192.168.149.1", "ssid": "HW-10CCA58E"},
+        {"id": "HW-A0857935", "name": "2 号车", "host": "192.168.150.2",
+         "wifi_host": "192.168.149.1", "ssid": "HW-A0857935"},
     ],
     "base": {
         "topic": "/controller/cmd_vel",
@@ -73,16 +74,25 @@ DEFAULTS = {
         },
         "limits": copy.deepcopy(SAFE_LIMITS),
         "actions": {"open": 2000, "close": 1500, "half_open": 1750,
-                    "arm_up": 1700, "arm_down": 1200,
+                    # 用户实机确认：1200 抬起，1700 降下。
+                    "arm_up": 1200, "arm_down": 1700,
                     "look_down": 1300, "look_forward": 1500},
         "presets": {
             # 2026-10-23 本次 2 号车稳定画面核对：1300 俯视夹取区，1500 前视。
             # 旧记录方向相反；另一台车需单独校准，不根据注释推断方向。
-            "待机（张爪）": {"pitch": 1300, "yaw": 1500, "arm": 1200, "gripper": 2000},
-            "俯视观察": {"pitch": 1300, "yaw": 1500, "arm": 1200, "gripper": 2000},
-            "夹取准备": {"pitch": 1300, "yaw": 1500, "arm": 1200, "gripper": 2000},
-            "抬起持物": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 1500},
+            "待机（张爪）": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 2000},
+            "俯视观察": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 2000},
+            "夹取准备": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 2000},
+            "抬起持物": {"pitch": 1300, "yaw": 1500, "arm": 1200, "gripper": 1500},
         },
+    },
+    "tracking_pick": {
+        "color": "red", "max_speed": .06, "min_speed": .02,
+        "max_turn": .30, "turn_gain": 1.2, "control_hz": 10,
+        "x_tolerance": .035, "y_tolerance": .025, "overshoot_margin": .08,
+        "stable_frames": 3, "frame_timeout": .6, "lost_timeout": 2.,
+        "odom_timeout": .8, "max_seconds": 45., "max_distance": .8,
+        "calibrations": {},
     },
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
@@ -110,7 +120,28 @@ def load_config(path=CONFIG_PATH):
             pass
     else:
         save_config(cfg, path)
-    return normalize_servo_config(cfg)
+    return normalize_connection_config(normalize_servo_config(cfg))
+
+
+def normalize_connection_config(cfg):
+    """补全旧的两车档案；共享热点地址不用于推断车辆身份。"""
+    profiles = cfg.get("cars") or copy.deepcopy(DEFAULTS["cars"])
+    for index, profile in enumerate(profiles):
+        known = next((p for p in DEFAULTS["cars"]
+                      if p["host"] == profile.get("host") or p["id"] == profile.get("id")), None)
+        if known:
+            for key, value in known.items():
+                profile.setdefault(key, value)
+        profile.setdefault("id", "car-%d" % (index + 1))
+        profile.setdefault("name", profile["id"])
+    cfg["cars"] = profiles
+    car = cfg["car"]
+    selected = next((p for p in profiles if p["id"] == car.get("profile_id")), None)
+    if not selected:
+        selected = next((p for p in profiles if p.get("host") == car["host"]), None)
+    car["profile_id"] = selected["id"] if selected else ""
+    car.setdefault("transport", "wifi" if car["host"] == "192.168.149.1" else "wired")
+    return cfg
 
 
 def normalize_servo_config(cfg):

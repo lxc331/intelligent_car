@@ -7,16 +7,24 @@
     "subnet_prefixes": [
       "192.168.150",
       "192.168.149"
-    ]
+    ],
+    "profile_id": "HW-A0857935",
+    "transport": "wired"
   },
   "cars": [
     {
       "name": "1 号车",
-      "host": "192.168.150.3"
+      "host": "192.168.150.3",
+      "id": "HW-10CCA58E",
+      "wifi_host": "192.168.149.1",
+      "ssid": "HW-10CCA58E"
     },
     {
       "name": "2 号车",
-      "host": "192.168.150.2"
+      "host": "192.168.150.2",
+      "id": "HW-A0857935",
+      "wifi_host": "192.168.149.1",
+      "ssid": "HW-A0857935"
     }
   ],
   "base": {
@@ -80,8 +88,8 @@
       "open": 2000,
       "close": 1500,
       "half_open": 1750,
-      "arm_up": 1700,
-      "arm_down": 1200,
+      "arm_up": 1200,
+      "arm_down": 1700,
       "look_down": 1300,
       "look_forward": 1500
     },
@@ -89,26 +97,61 @@
       "待机（张爪）": {
         "pitch": 1300,
         "yaw": 1500,
-        "arm": 1200,
+        "arm": 1700,
         "gripper": 2000
       },
       "俯视观察": {
         "pitch": 1300,
         "yaw": 1500,
-        "arm": 1200,
+        "arm": 1700,
         "gripper": 2000
       },
       "夹取准备": {
         "pitch": 1300,
         "yaw": 1500,
-        "arm": 1200,
+        "arm": 1700,
         "gripper": 2000
       },
       "抬起持物": {
         "pitch": 1300,
         "yaw": 1500,
-        "arm": 1700,
+        "arm": 1200,
         "gripper": 1500
+      }
+    }
+  },
+  "tracking_pick": {
+    "color": "red",
+    "max_speed": 0.06,
+    "min_speed": 0.02,
+    "max_turn": 0.3,
+    "turn_gain": 1.2,
+    "control_hz": 10,
+    "x_tolerance": 0.035,
+    "y_tolerance": 0.025,
+    "overshoot_margin": 0.08,
+    "stable_frames": 3,
+    "frame_timeout": 0.6,
+    "lost_timeout": 2.0,
+    "odom_timeout": 0.8,
+    "max_seconds": 45.0,
+    "max_distance": 0.8,
+    "calibrations": {
+      "HW-A0857935:192.168.150.2:red": {
+        "x": 0.45117867867867867,
+        "y": 0.7616716716716716,
+        "width": 0.259375,
+        "host": "192.168.150.2",
+        "color": "red",
+        "pose": {
+          "pitch": 1300,
+          "yaw": 1500,
+          "arm": 1700
+        },
+        "created": "2026-10-23 17:18:32",
+        "version": 2,
+        "contact_confirmed": true,
+        "reference_image": "D:\\林兴城的文件\\读研\\智慧交通工程中心\\.work\\tracking_pick\\fix_20261023_171344\\user_near_calibration.jpg"
       }
     }
   },

@@ -23,9 +23,9 @@ class TopBar(tk.Frame):
         self.app = app
 
         left = tk.Frame(self, bg=theme.PANEL)
-        left.pack(side="left", padx=10, pady=8)
+        left.pack(fill="x", padx=10, pady=(6, 2))
 
-        tk.Label(left, text="小车", bg=theme.PANEL, fg=theme.TEXT_DIM,
+        tk.Label(left, text="选择车辆与连接方式（Wi-Fi 请先连接对应车辆的热点）", bg=theme.PANEL, fg=theme.TEXT_DIM,
                  font=theme.FONT_SMALL).pack(anchor="w")
         row = tk.Frame(left, bg=theme.PANEL)
         row.pack(anchor="w")
@@ -33,24 +33,30 @@ class TopBar(tk.Frame):
         # ---- 多车下拉：配置里 cars 有几项就列几项 ----
         self.cars = list(app.cfg.get("cars") or [])
         self.var_car = tk.StringVar()
-        names = [c.get("name") or c.get("host") for c in self.cars]
+        names = [self._car_label(c) for c in self.cars]
         if self.cars:
-            cur = app.cfg["car"]["host"]
+            cur = app.cfg["car"].get("profile_id")
             for c in self.cars:
-                if c.get("host") == cur:
-                    self.var_car.set(c.get("name") or cur)
+                if c.get("id") == cur:
+                    self.var_car.set(self._car_label(c))
                     break
             else:
-                self.var_car.set(names[0])
+                self.var_car.set("请选择车辆" if app.cfg["car"].get("transport") == "wifi" else "手动地址")
             self.om_car = tk.OptionMenu(row, self.var_car, *names, command=self._pick_car)
             self.om_car.config(bg=theme.PANEL_2, fg=theme.ACCENT, relief="flat", bd=0,
                                highlightthickness=1, highlightbackground=theme.BORDER,
-                               font=theme.FONT_SMALL, width=7, anchor="w",
+                               font=theme.FONT_SMALL, width=24, anchor="w",
                                activebackground=theme.BORDER, activeforeground=theme.TEXT)
             self.om_car["menu"].config(bg=theme.PANEL_2, fg=theme.TEXT,
                                        activebackground=theme.BORDER,
                                        font=theme.FONT_SMALL)
             self.om_car.pack(side="left", padx=(0, 6))
+
+        self.var_transport = tk.StringVar(value="Wi-Fi 热点" if app.cfg["car"].get("transport") == "wifi" else "有线网口")
+        self.cb_transport = ttk.Combobox(row, textvariable=self.var_transport,
+                                        values=["有线网口", "Wi-Fi 热点"], width=12, state="readonly")
+        self.cb_transport.pack(side="left", padx=(0, 6))
+        self.cb_transport.bind("<<ComboboxSelected>>", lambda _: self._pick_car(self.var_car.get()))
 
         self.var_host = tk.StringVar(value=app.cfg["car"]["host"])
         entry = tk.Entry(row, textvariable=self.var_host, width=16,
@@ -70,8 +76,13 @@ class TopBar(tk.Frame):
                                   padx=10)
         self.btn_scan.pack(side="left", padx=2)
 
+        self.btn_diagnose = tk.Button(row, text="连接诊断", command=self._diagnose,
+                                     bg=theme.PANEL_2, fg=theme.ACCENT, relief="flat",
+                                     activebackground=theme.BORDER, font=theme.FONT_SMALL, padx=10)
+        self.btn_diagnose.pack(side="left", padx=2)
+
         right = tk.Frame(self, bg=theme.PANEL)
-        right.pack(side="right", padx=10)
+        right.pack(fill="x", padx=10, pady=(3, 7))
 
         self.lbl_conn = _chip(right, "ROS 连接")
         self.lbl_node = _chip(right, "节点数")
@@ -82,27 +93,37 @@ class TopBar(tk.Frame):
         self.lbl_base = _chip(right, "底盘")
 
     # ---------- 交互 ----------
+    @staticmethod
+    def _car_label(car):
+        return "%s · %s" % (car.get("name", ""), car.get("id", ""))
+
+    def sync_selection(self):
+        car = self.app.cfg["car"]
+        self.var_host.set(car["host"])
+        self.var_transport.set("Wi-Fi 热点" if car.get("transport") == "wifi" else "有线网口")
+        profile = next((p for p in self.cars if p["id"] == car.get("profile_id")), None)
+        self.var_car.set(self._car_label(profile) if profile else "手动地址")
+
     def _pick_car(self, name):
         """下拉选车：把该车的 host 填进地址框并立刻重连。"""
         for c in self.cars:
-            if (c.get("name") or c.get("host")) == name:
-                host = c.get("host")
+            if self._car_label(c) == name:
+                transport = "wifi" if self.var_transport.get() == "Wi-Fi 热点" else "wired"
+                host = c.get("wifi_host") if transport == "wifi" else c.get("host")
                 if host:
-                    self.var_host.set(host)
                     self.app.log("切换小车：%s（%s）" % (name, host))
-                    self.app.change_host(host)
+                    if not self.app.change_host(host, c["id"], transport):
+                        self.sync_selection()
                 return
 
     def _apply(self):
         host = self.var_host.get().strip()
         if not host:
             return
-        # 手填的地址如果正好是档案里的某台车，把下拉同步过去
-        for c in self.cars:
-            if c.get("host") == host:
-                self.var_car.set(c.get("name") or host)
-                break
-        self.app.change_host(host)
+        profile = next((c for c in self.cars if self._car_label(c) == self.var_car.get()), {})
+        profile_id = profile.get("id") if host == profile.get("wifi_host") else None
+        if not self.app.change_host(host, profile_id):
+            self.sync_selection()
 
     def _scan(self):
         self.btn_scan.config(state="disabled", text="搜索中…")
@@ -113,21 +134,15 @@ class TopBar(tk.Frame):
         if not found:
             self.app.log("自动搜索未找到小车，请检查网线与本机网段")
             return
-        if len(found) == 1:
-            self._use(found[0])
-            return
-        # 多台：列出来让用户选（两台同款车很常见）
-        self.app.log("搜索到 %d 台小车：%s" % (len(found), "、".join(found)))
+        # 即使只搜到一个端口候选也由用户选择，不能把别台车自动当作当前车。
+        self.app.log("搜索到 %d 个服务候选：%s" % (len(found), "、".join(found)))
         self._ask_which(found)
 
     def _use(self, host):
-        self.var_host.set(host)
-        for c in self.cars:
-            if c.get("host") == host:
-                self.var_car.set(c.get("name") or host)
-                break
-        self.app.change_host(host)
-        self.app.log("自动搜索到小车：%s" % host)
+        profile = next((c for c in self.cars if self._car_label(c) == self.var_car.get()), {})
+        profile_id = profile.get("id") if host == profile.get("wifi_host") else None
+        if self.app.change_host(host, profile_id):
+            self.app.log("使用所选服务地址：%s" % host)
 
     def _ask_which(self, found):
         win = tk.Toplevel(self)
@@ -136,12 +151,15 @@ class TopBar(tk.Frame):
         win.transient(self.winfo_toplevel())
         win.resizable(False, False)
 
-        tk.Label(win, text="找到多台小车，选一台连接：", bg=theme.BG, fg=theme.TEXT,
+        tk.Label(win, text="选择要连接的地址（候选可能只有部分服务就绪）：", bg=theme.BG, fg=theme.TEXT,
                  font=theme.FONT).pack(anchor="w", padx=14, pady=(12, 6))
 
         var = tk.StringVar(value=found[0])
         for ip in found:
-            tk.Radiobutton(win, text=ip, variable=var, value=ip, bg=theme.BG,
+            profile = next((c for c in self.cars if c.get("host") == ip), None)
+            label = "%s  %s" % (ip, self._car_label(profile) if profile else
+                                  ("共享热点，请先选对车辆与 SSID" if ip == "192.168.149.1" else "未识别设备"))
+            tk.Radiobutton(win, text=label, variable=var, value=ip, bg=theme.BG,
                            fg=theme.TEXT, selectcolor=theme.PANEL_2,
                            activebackground=theme.BG, activeforeground=theme.TEXT,
                            font=theme.FONT_MONO, anchor="w").pack(fill="x", padx=18)
@@ -154,12 +172,27 @@ class TopBar(tk.Frame):
                   relief="flat", font=theme.FONT_SMALL, padx=18, pady=3,
                   activebackground=theme.BORDER).pack(pady=10)
 
+    def _diagnose(self):
+        self.btn_diagnose.config(state="disabled", text="诊断中…")
+        self.app.diagnose_connection(self._diagnose_done)
+
+    def _diagnose_done(self, report):
+        self.btn_diagnose.config(state="normal", text="连接诊断")
+        win = tk.Toplevel(self)
+        win.title("连接诊断（只读）")
+        win.transient(self.winfo_toplevel())
+        text = tk.Text(win, width=85, height=23, wrap="word", font=theme.FONT_SMALL,
+                       bg=theme.PANEL, fg=theme.TEXT, padx=12, pady=12)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", report)
+        text.config(state="disabled")
+
     # ---------- 刷新 ----------
     def update_state(self, st):
         if st["ws_connected"]:
             self.lbl_conn.config(text="● 已连接", fg=theme.OK)
         else:
-            self.lbl_conn.config(text="● 未连接", fg=theme.ERR)
+            self.lbl_conn.config(text="● 重连中", fg=theme.WARN)
 
         nc = st.get("node_count")
         self.lbl_node.config(text=str(nc) if nc is not None else "--",

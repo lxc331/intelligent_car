@@ -10,6 +10,8 @@ import base64
 import os
 import socket
 import struct
+import threading
+import time
 
 
 class WebSocket:
@@ -19,7 +21,13 @@ class WebSocket:
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
         self._buf = b""
-        self._handshake()
+        self._send_lock = threading.Lock()
+        self.last_received = time.monotonic()
+        try:
+            self._handshake()
+        except Exception:
+            self.close()
+            raise
 
     def _handshake(self):
         key = base64.b64encode(os.urandom(16)).decode()
@@ -60,7 +68,8 @@ class WebSocket:
         mask = os.urandom(4)
         header += mask
         body = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
-        self.sock.sendall(bytes(header) + body)
+        with self._send_lock:
+            self.sock.sendall(bytes(header) + body)
 
     def _read_exact(self, n):
         out = b""
@@ -73,6 +82,7 @@ class WebSocket:
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise RuntimeError("连接已关闭")
+            self.last_received = time.monotonic()
             self._buf += chunk
         return out
 
@@ -108,9 +118,17 @@ class WebSocket:
         mask = os.urandom(4)
         header += mask
         body = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
-        self.sock.sendall(bytes(header) + body)
+        with self._send_lock:
+            self.sock.sendall(bytes(header) + body)
+
+    def ping(self):
+        self._send_control(0x09, b"carapp")
 
     def close(self):
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
         try:
             self.sock.close()
         except Exception:

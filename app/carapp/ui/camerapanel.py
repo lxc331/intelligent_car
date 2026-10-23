@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageDraw
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
@@ -37,6 +37,7 @@ class CameraPanel(tk.Frame):
         self._imgtk = None
         self._recording = False
         self._last_size = None
+        self._camera_session = None
         self._build()
         ctx.add_frame_listener(self._on_frame)
 
@@ -137,6 +138,20 @@ class CameraPanel(tk.Frame):
         return w - 4, max(80, h - 40)   # 40 ≈ 工具条高度
 
     def on_tick(self, st):
+        cam = self.ctx.app.camera
+        if cam is not self._camera_session or not st.get("cam_connected"):
+            self._camera_session = cam
+            self._last_frame = None
+            self._imgtk = None
+            self._last_size = None
+            self.lbl_img.config(image="", text="等待当前车辆的新画面…")
+            self.lbl_info.config(text="等待画面，连接会自动重试")
+            if not st.get("cam_connected"):
+                self._pending = None
+                return
+        if self._recording and (not cam or not cam.recording):
+            self._recording = False
+            self.btn_rec.config(text="开始录制", fg=theme.TEXT)
         if not self._pending:
             return
         ts, payload, mode = self._pending
@@ -145,6 +160,18 @@ class CameraPanel(tk.Frame):
         try:
             if mode == "jpeg" and HAS_PIL:
                 img = Image.open(io.BytesIO(payload))
+                target, cal = st.get("tracking_target"), st.get("tracking_calibration")
+                if self.var_topic.get() == "/image_raw" and (target or cal):
+                    img = img.convert("RGB")
+                    draw = ImageDraw.Draw(img)
+                    w,h = img.size
+                    if target:
+                        a,b,c,d = target["bbox"]
+                        draw.rectangle((a*w,b*h,c*w,d*h),outline="#00e5ff",width=3)
+                        draw.ellipse((target["x"]*w-4,target["y"]*h-4,target["x"]*w+4,target["y"]*h+4),fill="#00e5ff")
+                    if cal:
+                        draw.line((0,cal["y"]*h,w,cal["y"]*h),fill="#00ff66",width=2)
+                        draw.line((cal["x"]*w,0,cal["x"]*w,h),fill="#00ff66",width=2)
                 box = self._fit_box()
                 if box:
                     aw, ah = box
