@@ -155,6 +155,11 @@
       }
     }
   },
+  "cruise": {
+    "front_back_distance": 0.3,
+    "side_distance": 0.15,
+    "speed": 0.06
+  },
   "terminal": {
     "port": 22,
     "username": "pi",

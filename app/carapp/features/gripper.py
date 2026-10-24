@@ -2,10 +2,9 @@
 """功能：夹取（含底盘配合 + 底部实时画面）。
 
 页面结构：
-    左上  车轮：按住方向键走、松开停（速度三档）
-    左中  夹取动作：张爪 / 合爪 / 抬臂 / 降臂 / 云台俯视 / 云台平视
-    左下  预设姿态 + 一键夹取序列（可带前进 / 后退）
-    右上  四路舵机滑杆微调
+    上排  车轮 | 夹取动作
+    下排  预设姿态 / 一键序列 | 视觉追踪夹取
+    右侧  四路舵机滑杆微调
     底部  实时画面（CameraPanel），边夹边看
 
 所有指令：
@@ -38,6 +37,8 @@ class GripperFeature(Feature):
         self._jog_dir = None
         self._motion_thread = None
         self.tracking = None
+        self._layout_timer = None
+        self._layout_closed = False
 
     # ---------- 界面 ----------
     def build(self, parent):
@@ -57,14 +58,83 @@ class GripperFeature(Feature):
         right.pack(side="right", fill="y", padx=(6, 0))
         right.pack_propagate(False)
 
-        self._build_wheels(left)
-        self._build_actions(left)
-        self._build_presets(left)
-        self.tracking = TrackingPickControls(left, self)
+        # 每个区块独立占一格；固定区块的请求宽度，让列宽由窗口分配。
+        self.control_cells = []
+        for column in range(2):
+            left.columnconfigure(column, weight=1, uniform="control_columns")
+        for row, column in ((0, 0), (0, 1), (1, 0), (1, 1)):
+            cell = tk.Frame(left, bg=theme.BG, width=1, height=1)
+            cell.grid(row=row, column=column, sticky="nsew")
+            cell.pack_propagate(False)
+            self.control_cells.append(cell)
+
+        self._build_wheels(self.control_cells[0])
+        self._build_actions(self.control_cells[1])
+        self._build_presets(self.control_cells[2])
+        self.tracking = TrackingPickControls(self.control_cells[3], self)
+        self._control_rows = []
+        self._control_labels = []
+        for cell in self.control_cells:
+            cell.winfo_children()[0].pack_configure(fill="both", expand=True)
+            self._collect_control_layout(cell)
+            cell.bind("<Configure>", self._queue_control_layout)
         self._build_sliders(right)
 
         self.cam = CameraPanel(parent, self.ctx)
         self.cam.pack(fill="both", expand=True, padx=0, pady=(6, 6))
+
+    def _collect_control_layout(self, parent):
+        """保留原控件，只收集横排控件供窄列时换行。"""
+        children = parent.winfo_children()
+        if children and all(child.winfo_manager() == "pack" and
+                            child.pack_info()["side"] == "left" for child in children):
+            items = [(child, child.pack_info()) for child in children]
+            for child, _ in items:
+                child.pack_forget()
+            self._control_rows.append((parent, items))
+            parent.bind("<Configure>", self._queue_control_layout)
+        for child in children:
+            if isinstance(child, tk.Frame):
+                self._collect_control_layout(child)
+            elif isinstance(child, tk.Label) and child.winfo_manager() == "pack":
+                self._control_labels.append(child)
+
+    def _queue_control_layout(self, _event=None):
+        if not self._layout_closed and self._layout_timer is None:
+            self._layout_timer = self.ctx.root.after_idle(self._layout_controls)
+
+    def _layout_controls(self):
+        self._layout_timer = None
+        if self._layout_closed:
+            return
+        def padding(value):
+            return tuple(int(p) for p in value) if isinstance(value, tuple) else (int(value), int(value))
+
+        for label in self._control_labels:
+            width = max(80, label.master.winfo_width() - 16)
+            if int(label.cget("wraplength")) != width:
+                label.configure(wraplength=width)
+        for row, items in self._control_rows:
+            available = row.winfo_width()
+            if available < 2:
+                continue
+            x, y, line_height = 0, 0, 0
+            for child, options in items:
+                padx, pady = padding(options.get("padx", 0)), padding(options.get("pady", 0))
+                width = child.winfo_reqwidth() + 2 * int(options.get("ipadx", 0))
+                height = child.winfo_reqheight() + 2 * int(options.get("ipady", 0))
+                if x and x + width + sum(padx) > available:
+                    x, y, line_height = 0, y + line_height, 0
+                child.place(x=x + padx[0], y=y + pady[0], width=width, height=height)
+                x += width + sum(padx)
+                line_height = max(line_height, height + sum(pady))
+            height = y + line_height
+            if int(row.cget("height")) != height:
+                row.configure(height=height)
+        for cell in self.control_cells:
+            height = cell.winfo_children()[0].winfo_reqheight() + 6
+            if int(cell.cget("height")) != height:
+                cell.configure(height=height)
 
     # ---- 车轮 ----
     def _build_wheels(self, parent):
@@ -426,7 +496,14 @@ class GripperFeature(Feature):
     def on_deactivate(self):
         self.stop_all()
 
+    def on_vehicle_change(self):
+        self.stop_all()
+
     def on_close(self):
+        self._layout_closed = True
+        if self._layout_timer is not None:
+            self.ctx.root.after_cancel(self._layout_timer)
+            self._layout_timer = None
         self._abort = True
         if self.tracking:
             self.tracking.close()

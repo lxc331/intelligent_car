@@ -50,6 +50,13 @@ class TeleopTests(unittest.TestCase):
             self.assertEqual(self.twist()['angular']['z'], 0)
             self.assertEqual(self.app.state.get('base_vy'), 0.)
 
+
+    def test_removed_keys_never_reach_transport(self):
+        for key in ('z','c','Z','C'):
+            self.assertFalse(self.controller.press(key))
+        self.assertFalse(self.controller.pressed)
+        self.assertEqual(self.sent,[])
+
     def test_diagonal_is_bounded_and_release_keeps_other_axis(self):
         self.controller.press('w'); self.controller.press('q')
         msg = self.twist()['linear']
@@ -240,6 +247,16 @@ class RemoteWidgetTests(unittest.TestCase):
         self.assertFalse(self.feature._armed)
         self.assertEqual(self.app.state.get('base_vy'), 0.)
 
+    def test_removed_keys_are_ignored_when_keyboard_is_enabled(self):
+        self.arm()
+        count=len(self.sent)
+        for key in ('z','c','Z','C'):
+            self.assertIsNone(self.feature.key_press(self.event(key)))
+            self.assertIsNone(self.feature.key_release(self.event(key)))
+        self.assertFalse(self.feature.controller.pressed)
+        self.assertFalse(self.feature._releases)
+        self.assertEqual(len(self.sent),count)
+
 
 class AppLifecycleTests(unittest.TestCase):
     def test_full_app_tabs_camera_sharing_and_terminal_key_isolation(self):
@@ -251,8 +268,17 @@ class AppLifecycleTests(unittest.TestCase):
             app.root.withdraw()
             try:
                 app.select_tab('remote'); app.root.update()
-                self.assertEqual([f.key for f in app.features], ['gripper','remote','terminal'])
-                self.assertEqual(len(app.frame_listeners), 3)  # two previews plus visual tracker
+                self.assertEqual([f.key for f in app.features], ['gripper','remote','cruise','terminal'])
+                self.assertEqual(len(app.frame_listeners), 4)  # three previews plus visual tracker
+                def descendants(widget):
+                    for child in widget.winfo_children():
+                        yield child
+                        yield from descendants(child)
+                for feature in app.features[:2]:
+                    controls=list(descendants(feature.cam.master))
+                    self.assertFalse(any('自旋' in str(w.cget('text')) for w in controls if isinstance(w,tk.Button)))
+                self.assertFalse(hasattr(app.features[0],'_spin_controller'))
+                self.assertEqual(len(app.features[0].hold_btns),6)
                 remote = app.features[1]
                 app.state.update(ws_connected=True)
                 remote.var_mode.set('keyboard'); remote.change_mode(); remote.enable_keyboard()
@@ -262,7 +288,7 @@ class AppLifecycleTests(unittest.TestCase):
                 self.assertFalse(remote._armed)
                 self.assertEqual(app.state.get('base_vy'), 0.)
                 self.assertFalse(app.root.bind('<KeyPress>'))
-                self.assertTrue(app.features[2].text.bind('<KeyPress>'))
+                self.assertTrue(app.features[3].text.bind('<KeyPress>'))
                 app.select_tab('remote'); app.root.update()
                 self.assertFalse(remote._armed)
             finally:

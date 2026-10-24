@@ -137,7 +137,9 @@ class App:
             return lambda *args: self._post(self._session_callback, generation, callback, *args)
         self.bridge = RosBridge(
             car["host"], int(car["ws_port"]),
-            on_message=post(self._on_ros_message),
+            # Timestamp at transport receipt: queued old scans must not look fresh.
+            on_message=lambda topic, msg: self._post(self._session_callback, generation,
+                self._on_ros_message, topic, msg, time.monotonic()),
             on_status=post(self._on_ros_status),
             log=post(self.log),
             connection_guard=self._connection_guard(),
@@ -165,11 +167,19 @@ class App:
             self.ctx.stop_base()
             self.bridge.subscribe("/odom", throttle_ms=100)
             self.bridge.subscribe("/ros_robot_controller/battery", throttle_ms=1000)
+            for feature in getattr(self, "features", []):
+                for topic, throttle in getattr(feature, "ros_subscriptions", lambda: {})().items():
+                    self.bridge.subscribe(topic, throttle_ms=throttle)
             self._request_nodes()
 
-    def _on_ros_message(self, topic, msg):
+    def _on_ros_message(self, topic, msg, received_at=None):
         if not isinstance(msg, dict):
             return
+        received_at = time.monotonic() if received_at is None else received_at
+        for feature in getattr(self, "features", []):
+            callback = getattr(feature, "on_ros_message", None)
+            if callback:
+                callback(topic, msg, received_at)
         if topic.endswith("/odom"):
             try:
                 p = msg["pose"]["pose"]
@@ -425,7 +435,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description="ClawPi 小车控制台")
     ap.add_argument("--host", help="临时指定小车地址，覆盖 config/settings.json")
-    ap.add_argument("--tab", help="启动选项卡：gripper、remote 或 terminal")
+    ap.add_argument("--tab", help="启动选项卡：gripper、remote、cruise 或 terminal")
     args = ap.parse_args(argv)
 
     cfg = load_config()

@@ -94,6 +94,7 @@ DEFAULTS = {
         "odom_timeout": .8, "max_seconds": 45., "max_distance": .8,
         "calibrations": {},
     },
+    "cruise": {"front_back_distance": .60, "side_distance": .35, "speed": .06},
     "terminal": {"port": 22, "username": "pi", "auto_connect": True},
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
@@ -115,13 +116,21 @@ def load_config(path=CONFIG_PATH):
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                cfg = _merge(DEFAULTS, json.load(f))
+                cfg = _merge(DEFAULTS, migrate_cruise_config(json.load(f)))
         except Exception:
             # 配置写坏了也不能让程序起不来，退回默认值
             pass
     else:
         save_config(cfg, path)
     return normalize_connection_config(normalize_servo_config(cfg))
+
+
+def migrate_cruise_config(cfg):
+    """Migrate the old single threshold before merging defaults, preserving its value."""
+    cruise = cfg.get("cruise")
+    if isinstance(cruise, dict) and "detection_distance" in cruise:
+        cruise.setdefault("front_back_distance", cruise.pop("detection_distance"))
+    return cfg
 
 
 def normalize_connection_config(cfg):

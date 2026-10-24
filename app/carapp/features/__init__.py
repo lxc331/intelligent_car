@@ -10,12 +10,14 @@
 
 from carapp.features.gripper import GripperFeature
 from carapp.features.remote import RemoteFeature
+from carapp.features.cruise import CruiseFeature
 from carapp.features.terminal import TerminalFeature
 
 FEATURES = [
     GripperFeature,
     RemoteFeature,
+    CruiseFeature,
     TerminalFeature,
 ]
 
-__all__ = ["FEATURES", "GripperFeature", "RemoteFeature", "TerminalFeature"]
+__all__ = ["FEATURES", "GripperFeature", "RemoteFeature", "CruiseFeature", "TerminalFeature"]
