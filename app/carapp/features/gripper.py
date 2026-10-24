@@ -40,6 +40,10 @@ class GripperFeature(Feature):
         self._layout_timer = None
         self._layout_closed = False
 
+    @property
+    def motion_active(self):
+        return self._busy or bool(self._motion_thread and self._motion_thread.is_alive())
+
     # ---------- 界面 ----------
     def build(self, parent):
         cfg = self.ctx.cfg["servo"]

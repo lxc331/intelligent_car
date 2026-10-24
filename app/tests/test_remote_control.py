@@ -1,6 +1,7 @@
 """Teleoperation tests use a recording bridge, never a real robot."""
 import copy
 import math
+import threading
 import time
 import tkinter as tk
 import types
@@ -11,6 +12,7 @@ from carapp.config import DEFAULTS
 from carapp.core.teleop import TeleopController
 from carapp.features.base import AppContext
 from carapp.features.gripper import GripperFeature
+from carapp.features.cruise import CruiseFeature
 from carapp.features.remote import RemoteFeature
 from carapp.main import App
 from carapp.model.state import CarState
@@ -234,10 +236,32 @@ class RemoteWidgetTests(unittest.TestCase):
     def test_mouse_release_stop_and_sequence_exclusion(self):
         self.feature.mouse_press('e'); self.feature.mouse_release()
         self.assertEqual(self.app.state.get('base_vy'), 0.)
-        self.app.features.append(types.SimpleNamespace(_busy=True))
+        gripper = GripperFeature(AppContext(self.app))
+        gripper._busy = True
+        self.app.features.append(gripper)
         count = len(self.sent)
         self.feature.mouse_press('w')
         self.assertEqual(len(self.sent), count)
+
+    def test_cruise_stopping_thread_keeps_remote_blocked_until_finished(self):
+        cruise = CruiseFeature(AppContext(self.app))
+        finished = threading.Event()
+        cruise.runner.thread = threading.Thread(target=finished.wait, daemon=True)
+        cruise.runner.thread.start()
+        self.app.features.append(cruise)
+        try:
+            count = len(self.sent)
+            self.feature.mouse_press('w')
+            self.assertEqual(len(self.sent), count)
+            finished.set()
+            cruise.runner.thread.join(timeout=1.)
+            self.feature.mouse_press('w')
+            self.assertGreater(self.app.state.get('base_cmd')[0], 0.)
+            self.feature.mouse_release()
+            self.assertEqual(self.app.state.get('base_cmd'), (0., 0.))
+        finally:
+            finished.set()
+            cruise.runner.thread.join(timeout=1.)
 
     def test_vehicle_switch_disarms_and_stops_pending_release(self):
         self.arm(); self.feature.key_press(self.event('e'))

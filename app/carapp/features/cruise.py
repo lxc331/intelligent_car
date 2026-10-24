@@ -7,7 +7,8 @@ import tkinter as tk
 from datetime import datetime
 
 from carapp.config import save_config
-from carapp.core.cruise import CruisePolicy, CruiseRunner, CruiseSettings, LaserMonitor
+from carapp.core.cruise import CruisePolicy, CruiseRunner, CruiseSettings
+from carapp.core.laser_scan import LaserMonitor
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.camerapanel import CameraPanel
@@ -28,6 +29,10 @@ class CruiseFeature(Feature):
         self.events = []
         self.pending_frames = []
         self.record_lock = threading.RLock()
+
+    @property
+    def motion_active(self):
+        return self.runner.running or bool(self.runner.thread and self.runner.thread.is_alive())
 
     @property
     def _busy(self):
@@ -73,13 +78,13 @@ class CruiseFeature(Feature):
                                 font=theme.FONT_SMALL, anchor="w", justify="left", wraplength=1050)
         self.applied.pack(fill="x")
         self.phase = tk.Label(panel, text="待机：等待雷达和画面就绪后启动", bg=theme.PANEL,
-                              fg=theme.TEXT, font=theme.FONT_BOLD, anchor="w")
+                              fg=theme.TEXT, font=theme.FONT_BOLD, anchor="w", justify="left", wraplength=1050)
         self.phase.pack(fill="x", pady=(8, 3))
         self.sensor = tk.Label(panel, text="雷达：等待 /scan_raw", bg=theme.PANEL,
                                fg=theme.TEXT_DIM, font=theme.FONT_SMALL, anchor="w")
         self.sensor.pack(fill="x")
-        hint = tk.Label(panel, text="前方或侧方进入对应检测距离时前进转弯；后方距离用于检查车尾转弯空间，不自动倒车。"
-                            "连续三帧前方和两侧畅通后直行；转弯受阻时停车，20 秒未绕开则停止。切页、失焦、数据失效会取消巡航。",
+        hint = tk.Label(panel, text="左右分别检查前侧通路和对侧车尾空间，受阻时先停车，连续 3 帧确认后换向；"
+                            "停车至少 0.3 秒，换向间隔至少 1 秒。单次绕障总限时 20 秒；切页、失焦、数据失效会取消巡航。",
                  bg=theme.PANEL, fg=theme.TEXT_DIM, font=theme.FONT_SMALL,
                  wraplength=1050, justify="left", anchor="w")
         hint.pack(fill="x", pady=(6, 0))
@@ -87,6 +92,8 @@ class CruiseFeature(Feature):
             width = max(200, event.width-24)
             hint.configure(wraplength=width)
             self.applied.configure(wraplength=width)
+            self.sensor.configure(wraplength=width)
+            self.phase.configure(wraplength=width)
         panel.bind("<Configure>", wrap)
         self.cam = CameraPanel(parent, self.ctx)
         self.cam.pack(fill="both", expand=True, pady=(0, 6))
@@ -139,9 +146,7 @@ class CruiseFeature(Feature):
     def start(self):
         if not self.active or self.runner.running:
             return
-        others = [f for f in self.ctx.app.features if f is not self]
-        if any(getattr(f, "_busy", False) or
-               (getattr(f, "_motion_thread", None) and f._motion_thread.is_alive()) for f in others):
+        if self.ctx.motion_in_use(exclude=self):
             self.ctx.log("请先停止其他底盘或夹取动作")
             return
         if not self.apply_settings():
@@ -173,7 +178,8 @@ class CruiseFeature(Feature):
             scan = self.monitor.snapshot()
             self.events.append(dict(time=time.time(), phase=text, scan=scan,
                                     pose=self.ctx.state.get("pose"), base=self.ctx.state.get("base_cmd"),
-                                    lateral=self.ctx.state.get("base_vy")))
+                                    lateral=self.ctx.state.get("base_vy"),
+                                    turn_decision=self.runner.policy.diagnostics))
             frame = getattr(getattr(self, "cam", None), "_last_frame", None)
             if frame:
                 # Disk I/O belongs on the UI side, never inside the motor watchdog.
@@ -238,9 +244,9 @@ class CruiseFeature(Feature):
         def distance(key):
             return "%.2f m" % scan[key] if scan.get(key) is not None else "未知"
         self.phase.config(text=self.runner.phase, fg=theme.OK if self.runner.running else theme.TEXT)
-        self.sensor.config(text="雷达 %s｜前方通道 %s｜左侧 %s｜右侧 %s｜后方 %s｜%s" %
+        self.sensor.config(text="雷达 %s｜前方 %s｜左侧 %s｜右侧 %s｜左后 %s｜右后 %s｜%s" %
                            ("就绪" if fresh else "不可用", distance("front"), distance("left"), distance("right"),
-                            distance("rear"),
+                            distance("left_rear"), distance("right_rear"),
                             "延迟 %.2f s" % age if scan["received_at"] else "等待数据"),
                            fg=theme.OK if fresh else theme.ERR)
         self.cam.on_tick(st)

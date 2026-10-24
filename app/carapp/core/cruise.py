@@ -4,6 +4,9 @@ import threading
 import time
 from dataclasses import dataclass
 
+from carapp.core.laser_scan import LaserMonitor
+from carapp.core.cruise_turning import TurnSelector
+
 
 @dataclass(frozen=True)
 class CruiseSettings:
@@ -19,95 +22,6 @@ class CruiseSettings:
             raise ValueError("巡航速度须为 0.02–0.15 米/秒")
 
 
-class LaserMonitor:
-    """Keep sensor receipt time, not UI-processing time; never treat null as free space."""
-    SECTORS = {"front": (-45., 45.), "left": (35., 145.), "right": (-145., -35.),
-               "rear": (145., 215.), "left_ahead": (35., 90.), "right_ahead": (-90., -35.)}
-    # Vendor avoidance uses a 0.40 m vehicle envelope; add 2 cm on each side.
-    CORRIDOR_HALF_WIDTH = .22
-    TIMEOUT = .55
-
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.reset()
-
-    def reset(self):
-        with self.lock:
-            self.stamp = None
-            self.sequence = 0
-            self.view = dict(received_at=0., sequence=0, front=None, left=None, right=None, rear=None,
-                             left_ahead=None, right_ahead=None,
-                             coverage={}, error="等待 /scan_raw 雷达数据")
-
-    def update(self, msg, received_at):
-        try:
-            ranges = msg["ranges"]
-            start, increment = float(msg["angle_min"]), float(msg["angle_increment"])
-            minimum, maximum = float(msg["range_min"]), float(msg["range_max"])
-            header = msg["header"]
-            if header.get("frame_id", "").lstrip("/") != "lidar_frame":
-                raise ValueError("雷达坐标系不是 lidar_frame，拒绝猜测前方方向")
-            stamp = (int(header["stamp"]["sec"]), int(header["stamp"]["nanosec"]))
-            if not all(math.isfinite(v) for v in (start, increment, minimum, maximum, received_at)):
-                raise ValueError("雷达参数不是有限数值")
-            if not isinstance(ranges, (list, tuple)) or not 100 <= len(ranges) <= 10000:
-                raise ValueError("雷达点数不完整")
-            if not 5.5 <= abs(increment) * (len(ranges)-1) <= 6.5 or not 0 <= minimum < maximum <= 10000:
-                raise ValueError("需要完整的 360° 雷达扫描和有效量程")
-            sectors = {key: [] for key in self.SECTORS}
-            for index, raw in enumerate(ranges):
-                angle = math.degrees(math.atan2(math.sin(start+index*increment), math.cos(start+index*increment)))
-                value = None
-                if isinstance(raw, (float, int)) and not isinstance(raw, bool):
-                    # +Inf explicitly means no return within range. JSON null is ambiguous.
-                    if raw == math.inf:
-                        value = maximum
-                    elif math.isfinite(raw) and 0 < raw <= maximum:
-                        value = float(raw)  # even a positive reading below range_min is a close hazard
-                for key, (lo, hi) in self.SECTORS.items():
-                    sector_angle = angle % 360. if key == "rear" else angle
-                    if lo <= sector_angle <= hi:
-                        distance = value
-                        if key == "front" and value is not None and raw != math.inf:
-                            radians = math.radians(angle)
-                            # Off-axis returns outside the driving corridor belong
-                            # to the independently configured side detection.
-                            distance = (value*math.cos(radians)
-                                        if abs(value*math.sin(radians)) <= self.CORRIDOR_HALF_WIDTH
-                                        else maximum)
-                        sectors[key].append((sector_angle, distance))
-            view = dict(received_at=received_at, error="", coverage={})
-            for key, samples in sectors.items():
-                samples.sort()
-                valid = [value for _, value in samples if value is not None]
-                coverage = len(valid) / max(1, len(samples))
-                longest = missing = 0
-                for _, value in samples:
-                    missing = missing+1 if value is None else 0
-                    longest = max(longest, missing)
-                healthy = len(valid) >= 8 and coverage >= .65 and math.degrees(abs(increment))*longest <= 12.
-                view[key] = min(valid) if healthy else None
-                view["coverage"][key] = coverage
-            if view["front"] is None:
-                view["error"] = "前方雷达数据不足或存在过大盲区"
-        except (KeyError, ValueError, TypeError, OverflowError) as exc:
-            view = dict(received_at=received_at, front=None, left=None, right=None, rear=None,
-                        left_ahead=None, right_ahead=None,
-                        coverage={}, error="无效雷达数据："+str(exc))
-            stamp = None
-        with self.lock:
-            if stamp is not None and stamp == self.stamp:
-                return False
-            self.stamp = stamp
-            self.sequence += 1
-            self.view = dict(view, sequence=self.sequence)
-        return True
-
-    def snapshot(self):
-        with self.lock:
-            return dict(self.view)
-
-
 class CruisePolicy:
     """Keep forward velocity through clear avoidance arcs; stop on unsafe geometry."""
     AVOID_TIMEOUT = 20.
@@ -117,12 +31,23 @@ class CruisePolicy:
     def __init__(self):
         self.phase = "forward"
         self.avoid_started = None
-        self.direction = None
+        self.turning = TurnSelector()
         self.clear_count = 0
         self.last_sequence = None
+        self.last_now = None
+
+    @property
+    def direction(self):
+        return self.turning.direction
+
+    @property
+    def diagnostics(self):
+        elapsed = self.last_now-self.avoid_started if self.avoid_started is not None else 0.
+        return dict(self.turning.snapshot(), avoid_elapsed=elapsed)
 
     def decide(self, scan, settings, now):
         # Result: forward speed, yaw rate, phase text, fatal stop. Lateral speed is always zero.
+        self.last_now = now
         age = now-scan.get("received_at", 0.)
         if age < -.01 or age > LaserMonitor.TIMEOUT:
             return 0., 0., "雷达数据超时，已停止，请重新启动", True
@@ -144,7 +69,7 @@ class CruisePolicy:
                     speed = min(speed, .03)
                 return speed, 0., "自动前进" if speed == settings.speed else "前方接近障碍，慢速前进", False
             self.phase, self.avoid_started = "avoid", now
-        if self.avoid_started is not None and now-self.avoid_started > self.AVOID_TIMEOUT:
+        if self.avoid_started is not None and now-self.avoid_started >= self.AVOID_TIMEOUT:
             return 0., 0., "20 秒内未找到绕行通道，已停止", True
         if scan["sequence"] != self.last_sequence:
             self.last_sequence = scan["sequence"]
@@ -152,27 +77,23 @@ class CruisePolicy:
             self.clear_count = self.clear_count+1 if clear else 0
         if self.clear_count >= 3:
             self.phase = "forward"
-            self.avoid_started = self.direction = None
+            self.avoid_started = None
+            self.turning = TurnSelector()
             self.clear_count = 0
             return self.decide(scan, settings, now)
-        # Forward motion may leave a rear obstacle; a turn still needs rear swing room.
-        rear = scan.get("rear")
-        if rear is None or rear <= settings.front_back_distance:
-            if front >= settings.front_back_distance and not side_alert:
-                speed = min(settings.speed, self.ARC_SPEED, .02 if front < .45 else self.ARC_SPEED)
-                return speed, 0., "后方转弯空间受限，保持前进直行", False
-            return 0., 0., "后方未满足前后检测距离或数据不足，停车等待转弯", False
-        if self.direction is None:
-            candidates = [(scan[key], key) for key in ("left", "right")
-                          if scan[key] > side_limit+.03]
-            if not candidates:
-                return 0., 0., "左右通道受阻，停车等待", False
-            self.direction = max(candidates)[1]
-        side = scan.get(self.direction)
-        if side is None or side <= side_limit:
-            return 0., 0., "绕行侧未满足左右检测距离，停车等待", False
+        # If an already-passed side obstacle blocks rotation, a separately checked
+        # full-width forward corridor can still permit driving away without turning.
+        corridor = scan.get("straight_corridor")
+        straight_clear = front >= settings.front_back_distance and not side_alert
+        if "straight_corridor" in scan:
+            straight_clear = front >= settings.front_back_distance and corridor is not None and corridor >= settings.front_back_distance
+        direction, text = self.turning.choose(scan, settings, now, straight_clear=straight_clear)
+        if direction is None:
+            return 0., 0., text, False
         speed = min(settings.speed, self.ARC_SPEED, .02 if front < .45 else self.ARC_SPEED)
-        wz = self.TURN_SPEED * (1 if self.direction == "left" else -1)
+        if direction == "straight":
+            return speed, 0., text, False
+        wz = self.TURN_SPEED * (1 if direction == "left" else -1)
         return speed, wz, "前进向%s转弯绕障" % ("左" if wz > 0 else "右"), False
 
 

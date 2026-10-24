@@ -24,9 +24,12 @@ def scan_message(ranges=None, sequence=1):
                 ranges=ranges if ranges is not None else [4.]*400)
 
 
-def view(front=4., left=4., right=4., now=100., sequence=1, rear=4.):
-    return dict(front=front, left=left, right=right, rear=rear,
-                received_at=now, sequence=sequence, error="")
+def view(front=4., left=4., right=4., now=100., sequence=1, rear=4., **regions):
+    def closest(a,b):return min(a,b) if a is not None and b is not None else None
+    result=dict(front=front, left=left, right=right, rear=rear,
+                left_front=closest(front,left),right_front=closest(front,right),
+                left_rear=rear,right_rear=rear,received_at=now,sequence=sequence,error="")
+    return dict(result,**regions)
 
 
 class LaserTests(unittest.TestCase):
@@ -155,13 +158,13 @@ class PolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):CruiseSettings(side_distance=distance)
 
     def test_below_point_three_uses_configured_distances_without_fixed_stop(self):
-        settings=CruiseSettings(.1,.06,side_distance=.1)
+        settings=CruiseSettings(.2,.06,side_distance=.1)
         result=CruisePolicy().decide(view(.29,.29,.29,rear=.29),settings,100.)
         self.assertGreater(result[0],0.);self.assertEqual(result[1],0.);self.assertFalse(result[3])
         # The front and rear both lie below the old floor; turn using the configured thresholds.
-        result=CruisePolicy().decide(view(.09,.29,.29,rear=.2),settings,100.)
+        result=CruisePolicy().decide(view(.19,.29,.29,rear=.25),settings,100.)
         self.assertGreater(result[0],0.);self.assertNotEqual(result[1],0.);self.assertFalse(result[3])
-        result=CruisePolicy().decide(view(.29,.09,.29,rear=.2),settings,100.)
+        result=CruisePolicy().decide(view(.29,.09,.29,rear=.25),settings,100.)
         self.assertGreater(result[0],0.);self.assertLess(result[1],0.);self.assertFalse(result[3])
 
     def test_blocked_turn_still_waits_at_configured_low_thresholds(self):
@@ -190,7 +193,7 @@ class PolicyTests(unittest.TestCase):
         scan=view(.5,rear=.7)
         self.assertGreater(CruisePolicy().decide(scan,CruiseSettings(.6),100.)[0],0.)
         result=CruisePolicy().decide(scan,CruiseSettings(.8),100.)
-        self.assertEqual(result[:2],(0.,0.));self.assertIn('后方',result[2])
+        self.assertEqual(result[:2],(0.,0.));self.assertIn('后',result[2])
         result=CruisePolicy().decide(view(2.,rear=.2),CruiseSettings(.8),100.)
         self.assertGreater(result[0],0.);self.assertEqual(result[1],0.);self.assertFalse(result[3])
 
@@ -372,6 +375,9 @@ class CruiseWidgetTests(unittest.TestCase):
                 self.assertTrue(list(Path(folder).glob('阶段_*.jpg')))
                 feature.on_deactivate();self.assertFalse(feature._busy);self.assertFalse(camera.recording)
                 self.assertTrue((Path(folder)/'运行记录.json').exists())
+                report=json.loads((Path(folder)/'运行记录.json').read_text(encoding='utf-8'))
+                self.assertTrue(report['events'])
+                self.assertTrue(all('turn_decision' in event for event in report['events']))
                 feature.on_vehicle_change();self.assertIsNone(feature.monitor.snapshot()['front'])
         finally:
             feature.on_close();root.destroy()

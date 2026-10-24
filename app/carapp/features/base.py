@@ -46,6 +46,10 @@ class AppContext:
         """注册摄像头帧回调：cb(timestamp, payload_bytes, mode)。"""
         self.app.frame_listeners.append(cb)
 
+    def motion_in_use(self, exclude=None):
+        """查询其他功能是否仍占用底盘，包括停止过程中的运动线程。"""
+        return any(feature.motion_active for feature in self.app.features if feature is not exclude)
+
     def save_dir(self, sub=""):
         base = self.cfg["camera"].get("save_dir", "捕获")
         path = base if os.path.isabs(base) else os.path.join(APP_DIR, base)
@@ -129,6 +133,11 @@ class Feature:
 
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
+
+    @property
+    def motion_active(self):
+        """持续运动功能覆写此查询；页面之间不读取对方的线程或内部标志。"""
+        return False
 
     def build(self, parent):
         """在 parent 里创建控件。子类必须实现。"""

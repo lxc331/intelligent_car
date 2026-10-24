@@ -132,10 +132,8 @@ class RemoteFeature(Feature):
         if not self._active or not self.ctx.state.get("ws_connected"):
             self.ctx.log("请进入遥控页并等待 ROS 连接后再操作")
             return False
-        if any(getattr(feature, "_busy", False) or
-               (getattr(feature, "_motion_thread", None) and feature._motion_thread.is_alive())
-               for feature in self.ctx.app.features if feature is not self):
-            self.ctx.log("请等待夹取动作停止后再遥控")
+        if self.ctx.motion_in_use(exclude=self):
+            self.ctx.log("请等待其他底盘或夹取动作停止后再遥控")
             return False
         return True
 
