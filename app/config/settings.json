@@ -156,9 +156,11 @@
     }
   },
   "cruise": {
-    "front_back_distance": 0.4,
-    "side_distance": 0.2,
-    "speed": 0.15
+    "detection_distance": 0.4,
+    "speed": 0.15,
+    "mode": "avoid",
+    "scan_angle": 90.0,
+    "lidar_type": "standard"
   },
   "terminal": {
     "port": 22,

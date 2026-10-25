@@ -94,7 +94,8 @@ DEFAULTS = {
         "odom_timeout": .8, "max_seconds": 45., "max_distance": .8,
         "calibrations": {},
     },
-    "cruise": {"front_back_distance": .60, "side_distance": .35, "speed": .06},
+    "cruise": {"detection_distance": .60, "speed": .06, "mode": "avoid",
+               "scan_angle": 90., "lidar_type": "standard"},
     "terminal": {"port": 22, "username": "pi", "auto_connect": True},
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
@@ -126,10 +127,28 @@ def load_config(path=CONFIG_PATH):
 
 
 def migrate_cruise_config(cfg):
-    """Migrate the old single threshold before merging defaults, preserving its value."""
+    """Move prior cruise settings to the vendor threshold without touching other features."""
     cruise = cfg.get("cruise")
-    if isinstance(cruise, dict) and "detection_distance" in cruise:
-        cruise.setdefault("front_back_distance", cruise.pop("detection_distance"))
+    if isinstance(cruise, dict):
+        value = cruise.get("detection_distance", cruise.get("front_back_distance", .60))
+        try:
+            distance = float(value)
+            if not math.isfinite(distance):
+                raise ValueError("nonfinite distance")
+        except (ValueError, TypeError, OverflowError):
+            distance = DEFAULTS["cruise"]["detection_distance"]
+        cruise["detection_distance"] = max(.30, min(1.50, distance))
+        cruise.pop("front_back_distance", None)
+        cruise.pop("side_distance", None)
+        try:
+            speed = float(cruise.get("speed", .06))
+            if not math.isfinite(speed) or not .02 <= speed <= .15:
+                raise ValueError("invalid speed")
+        except (ValueError, TypeError, OverflowError):
+            speed = DEFAULTS["cruise"]["speed"]
+        cruise["speed"] = speed
+        if cruise.get("mode", "avoid") not in ("avoid", "follow", "guard"):
+            cruise["mode"] = "avoid"
     return cfg
 
 
