@@ -11,6 +11,8 @@ import json
 import os
 import math
 
+from carapp.core.connection_profiles import normalize_profiles
+
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = os.path.join(APP_DIR, "config")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
@@ -34,9 +36,9 @@ DEFAULTS = {
     # 按两台车采集文档记录的 NetworkManager 持久地址配置。
     "cars": [
         {"id": "HW-10CCA58E", "name": "1 号车", "host": "192.168.150.3",
-         "wifi_host": "192.168.149.1", "ssid": "HW-10CCA58E"},
+         "wifi_host": "192.168.149.1", "ssid": "HW-10CCA58E", "sta_host": "", "sta_ssid": ""},
         {"id": "HW-A0857935", "name": "2 号车", "host": "192.168.150.2",
-         "wifi_host": "192.168.149.1", "ssid": "HW-A0857935"},
+         "wifi_host": "192.168.149.1", "ssid": "HW-A0857935", "sta_host": "", "sta_ssid": ""},
     ],
     "base": {
         "topic": "/controller/cmd_vel",
@@ -164,13 +166,7 @@ def normalize_connection_config(cfg):
         profile.setdefault("id", "car-%d" % (index + 1))
         profile.setdefault("name", profile["id"])
     cfg["cars"] = profiles
-    car = cfg["car"]
-    selected = next((p for p in profiles if p["id"] == car.get("profile_id")), None)
-    if not selected:
-        selected = next((p for p in profiles if p.get("host") == car["host"]), None)
-    car["profile_id"] = selected["id"] if selected else ""
-    car.setdefault("transport", "wifi" if car["host"] == "192.168.149.1" else "wired")
-    return cfg
+    return normalize_profiles(cfg)
 
 
 def normalize_servo_config(cfg):

@@ -22,7 +22,8 @@ from carapp.config import load_config, save_config  # noqa: E402
 from carapp.core.camera import CameraStream  # noqa: E402
 from carapp.core.discovery import scan as scan_net  # noqa: E402
 from carapp.core.rosbridge import RosBridge  # noqa: E402
-from carapp.core.connection import diagnose, require_wifi  # noqa: E402
+from carapp.core.connection import diagnose, require_wifi, search_prefixes  # noqa: E402
+from carapp.core.connection_profiles import plan_connection, apply_connection  # noqa: E402
 from carapp.features import FEATURES  # noqa: E402
 from carapp.features.base import AppContext  # noqa: E402
 from carapp.model.state import CarState  # noqa: E402
@@ -236,34 +237,28 @@ class App:
             self.camera = None
 
     # ---------------- 主机切换 / 自动发现 ----------------
-    def change_host(self, host, profile_id=None, transport=None):
-        for feature in self.features:
-            if getattr(feature, "_busy", False):
-                self.log("动作序列执行中，请先中止并等待结束后切换小车")
-                return False
+    def change_host(self, host, profile_id=None, transport=None, sta_ssid=None):
+        try:
+            plan = plan_connection(self.cfg, host, profile_id, transport, sta_ssid)
+        except ValueError as exc:
+            self.log("连接设置未应用：%s" % exc)
+            return False
+        if self.ctx.motion_in_use():
+            self.log("运动或动作序列执行中，请先停止并等待结束后切换连接")
+            return False
         for feature in self.features:
             if hasattr(feature, "stop_all"):
                 feature.stop_all()
             tracking = getattr(feature, "tracking", None)
             if tracking:
                 tracking.reset()
-        if any(getattr(f, "_motion_thread", None) and f._motion_thread.is_alive() for f in self.features):
+        if self.ctx.motion_in_use():
             self.log("正在停止上台车的运动线程，请稍后再切换")
             return False
         for feature in self.features:
             if hasattr(feature,"on_vehicle_change"):
                 feature.on_vehicle_change()
-        profiles = self.cfg["cars"]
-        profile = next((p for p in profiles if p["id"] == profile_id), None)
-        if not profile_id:
-            profile = next((p for p in profiles if p.get("host") == host), None)
-        transport = transport or ("wifi" if host == "192.168.149.1" else "wired")
-        if transport == "wifi" and not profile:
-            self.log("两车热点地址相同，请先选好车辆，再选择 Wi-Fi 热点连接")
-            return False
-        self.cfg["car"]["profile_id"] = profile["id"] if profile else ""
-        self.cfg["car"]["transport"] = transport
-        self.cfg["car"]["host"] = host
+        apply_connection(self.cfg, plan)
         save_config(self.cfg)
         self.state.update(ws_connected=False, cam_size=None, node_count=None,
                           battery_mv=None, pose=None, pose_seen_at=0, servo_targets={}, gripper_target=None,
@@ -280,15 +275,16 @@ class App:
             return
         self._scan_running = True
         generation = self._connection_generation
-        # 两条接入路径都要扫：网线 192.168.150.x、车自己发的 WiFi 热点 192.168.149.x
-        prefixes = self.cfg["car"].get("subnet_prefixes")
-        if not prefixes:
-            prefixes = [self.cfg["car"].get("subnet_prefix", "192.168.150"), "192.168.149"]
+        import copy
+        car, profiles = copy.deepcopy(self.cfg["car"]), copy.deepcopy(self.cfg["cars"])
 
         def worker():
             try:
-                found = scan_net(prefixes, http_port=int(self.cfg["car"]["http_port"]),
-                                 ws_port=int(self.cfg["car"]["ws_port"]),
+                prefixes = search_prefixes(car, profiles)
+                if not prefixes:
+                    raise ValueError("无法确定搜索网段，请先填写小车的局域网 IPv4 地址")
+                found = scan_net(prefixes, http_port=int(car["http_port"]),
+                                 ws_port=int(car["ws_port"]),
                                  cancel=lambda: self._closing)
             except Exception as exc:
                 self.log("搜索失败：%s" % exc)
@@ -435,16 +431,27 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(description="ClawPi 小车控制台")
     ap.add_argument("--host", help="临时指定小车地址，覆盖 config/settings.json")
+    ap.add_argument("--transport", choices=("wired", "wifi", "sta"), help="连接方式：有线、AP 热点、STA 局域网")
+    ap.add_argument("--car", help="车辆档案 ID，例如 HW-A0857935")
     ap.add_argument("--tab", help="启动选项卡：gripper、remote、cruise 或 terminal")
     args = ap.parse_args(argv)
 
     cfg = load_config()
-    if args.host:
-        cfg["car"]["host"] = args.host
-        cfg["car"]["transport"] = "wifi" if args.host == "192.168.149.1" else "wired"
-        if cfg["car"]["transport"] == "wired":
-            profile = next((p for p in cfg["cars"] if p["host"] == args.host), {})
-            cfg["car"]["profile_id"] = profile.get("id", "")
+    if args.host or args.transport or args.car:
+        from carapp.core.connection_profiles import get_profile, endpoint_for
+        profile = get_profile(cfg, args.car or cfg["car"].get("profile_id"))
+        mode = args.transport
+        host = args.host
+        if not host:
+            mode = mode or cfg["car"].get("transport", "wired")
+            host = endpoint_for(profile or {}, mode)
+        profile_id = args.car
+        if not profile_id and mode in ("sta", "wifi"):
+            profile_id = (profile or {}).get("id")
+        try:
+            apply_connection(cfg, plan_connection(cfg, host, profile_id, mode))
+        except ValueError as exc:
+            ap.error(str(exc))
 
     app = App(cfg)
     if args.tab:

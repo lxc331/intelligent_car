@@ -1,6 +1,6 @@
 {
   "car": {
-    "host": "192.168.150.2",
+    "host": "192.168.137.192",
     "http_port": 8080,
     "ws_port": 9090,
     "subnet_prefix": "192.168.150",
@@ -9,7 +9,8 @@
       "192.168.149"
     ],
     "profile_id": "HW-A0857935",
-    "transport": "wired"
+    "transport": "sta",
+    "sta_ssid": "Win11_Meng_plus"
   },
   "cars": [
     {
@@ -17,14 +18,18 @@
       "host": "192.168.150.3",
       "id": "HW-10CCA58E",
       "wifi_host": "192.168.149.1",
-      "ssid": "HW-10CCA58E"
+      "ssid": "HW-10CCA58E",
+      "sta_host": "",
+      "sta_ssid": ""
     },
     {
       "name": "2 号车",
       "host": "192.168.150.2",
       "id": "HW-A0857935",
       "wifi_host": "192.168.149.1",
-      "ssid": "HW-A0857935"
+      "ssid": "HW-A0857935",
+      "sta_host": "192.168.137.192",
+      "sta_ssid": "Win11_Meng_plus"
     }
   ],
   "base": {
