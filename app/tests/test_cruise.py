@@ -29,7 +29,18 @@ def view(front=4., left=4., right=4., now=100., sequence=1, rear=4., **regions):
     result=dict(front=front, left=left, right=right, rear=rear,
                 left_front=closest(front,left),right_front=closest(front,right),
                 left_rear=rear,right_rear=rear,received_at=now,sequence=sequence,error="")
-    return dict(result,**regions)
+    result.update(regions)
+    message=scan_message(sequence=sequence)
+    for index,key in ((0,'front'),(100,'left'),(300,'right'),(200,'rear')):
+        message['ranges'][index]=result[key]
+    for index,key in ((20,'left_front'),(380,'right_front'),(125,'left_rear'),(275,'right_rear')):
+        if key in regions:message['ranges'][index]=regions[key]
+    monitor=LaserMonitor();monitor.update(message,now)
+    snapshot=monitor.snapshot()
+    # Legacy summary-only test inputs retain explicit unknown beams; production
+    # snapshots additionally carry separately bounded visibility support.
+    result['rays']=snapshot['rays']
+    return result
 
 
 class LaserTests(unittest.TestCase):
@@ -38,9 +49,9 @@ class LaserTests(unittest.TestCase):
         monitor=LaserMonitor();monitor.update(msg,20.)
         self.assertGreater(monitor.snapshot()['front'],3.)
         self.assertEqual(monitor.snapshot()['left'],.6)
-        msg=scan_message(sequence=2);msg['ranges'][22]=.5
+        msg=scan_message(sequence=2);msg['ranges'][11]=.5
         monitor.update(msg,20.)
-        self.assertAlmostEqual(monitor.snapshot()['front'],.5*math.cos(math.radians(19.8)))
+        self.assertAlmostEqual(monitor.snapshot()['front'],.5*math.cos(math.radians(9.9)))
 
     def test_sectors_respect_angle_origin_and_not_array_halves(self):
         distances = [4.]*400
@@ -114,20 +125,20 @@ class PolicyTests(unittest.TestCase):
         policy=CruisePolicy();settings=CruiseSettings()
         for now,sequence in ((100.,1),(100.1,2),(100.3,3)):
             result=policy.decide(view(.5,.8,1.2,now,sequence),settings,now)
-            self.assertEqual(result[:2],(.04,-.4));self.assertFalse(result[3])
+            self.assertEqual(result[:2],(.04,-.15));self.assertFalse(result[3])
         # Direction remains locked even when the other side becomes larger.
         self.assertLess(policy.decide(view(.5,2.,1.,100.4,4),settings,100.4)[1],0.)
 
     def test_both_sides_blocked_wait_and_timeout_stops(self):
         policy=CruisePolicy();settings=CruiseSettings()
-        policy.decide(view(.5,.34,.34),settings,100.)
-        self.assertEqual(policy.decide(view(.5,.34,.34,101.,2),settings,101.)[:2],(0.,0.))
-        self.assertTrue(policy.decide(view(.5,.34,.34,121.,3),settings,121.)[3])
+        policy.decide(view(.5,.1,.1),settings,100.)
+        self.assertEqual(policy.decide(view(.5,.1,.1,101.,2),settings,101.)[:2],(0.,0.))
+        self.assertTrue(policy.decide(view(.5,.1,.1,121.,3),settings,121.)[3])
 
-    def test_unknown_side_or_rear_hazard_stops_turning_sweep(self):
+    def test_unknown_side_or_obstacle_in_current_body_stops_turning(self):
         policy=CruisePolicy();settings=CruiseSettings()
         for scan,fatal in ((view(.5,None,1.),True),
-                           (view(.5,rear=.29),False),(view(.5,rear=None),False)):
+                           (view(.5,rear=.05),False),(view(.5,.1,.1),False)):
             result=policy.decide(scan,settings,100.)
             self.assertEqual(result[:2],(0.,0.));self.assertEqual(result[3],fatal)
 
@@ -161,10 +172,11 @@ class PolicyTests(unittest.TestCase):
         settings=CruiseSettings(.2,.06,side_distance=.1)
         result=CruisePolicy().decide(view(.29,.29,.29,rear=.29),settings,100.)
         self.assertGreater(result[0],0.);self.assertEqual(result[1],0.);self.assertFalse(result[3])
-        # The front and rear both lie below the old floor; turn using the configured thresholds.
+        # There is no 0.30 m floor, but a point inside the measured body must still stop.
         result=CruisePolicy().decide(view(.19,.29,.29,rear=.25),settings,100.)
-        self.assertGreater(result[0],0.);self.assertNotEqual(result[1],0.);self.assertFalse(result[3])
-        result=CruisePolicy().decide(view(.29,.09,.29,rear=.25),settings,100.)
+        self.assertEqual(result[:2],(0.,0.));self.assertFalse(result[3])
+        # A side trigger below 0.30 m can still turn where the footprint fits.
+        result=CruisePolicy().decide(view(.4,.2,.29,rear=.25),CruiseSettings(.2,.06,.25),100.)
         self.assertGreater(result[0],0.);self.assertLess(result[1],0.);self.assertFalse(result[3])
 
     def test_blocked_turn_still_waits_at_configured_low_thresholds(self):
@@ -183,17 +195,17 @@ class PolicyTests(unittest.TestCase):
         self.assertGreater(vx,0.);self.assertLess(wz,0.);self.assertFalse(fatal)
         self.assertGreater(CruisePolicy().decide(view(2.,1.5,.5),CruiseSettings(side_distance=.6),100.)[1],0.)
 
-    def test_side_threshold_controls_available_turn_direction(self):
+    def test_side_threshold_triggers_avoidance_without_becoming_a_body_radius(self):
         scan=view(.5,.55,.45)
         self.assertGreater(CruisePolicy().decide(scan,CruiseSettings(side_distance=.4),100.)[1],0.)
         result=CruisePolicy().decide(scan,CruiseSettings(side_distance=.6),100.)
-        self.assertEqual(result[:2],(0.,0.));self.assertFalse(result[3])
+        self.assertGreater(result[0],0.);self.assertGreater(result[1],0.);self.assertFalse(result[3])
 
-    def test_rear_uses_front_back_threshold_for_turning_but_allows_driving_away(self):
+    def test_distant_rear_point_does_not_block_turning_or_driving_away(self):
         scan=view(.5,rear=.7)
         self.assertGreater(CruisePolicy().decide(scan,CruiseSettings(.6),100.)[0],0.)
         result=CruisePolicy().decide(scan,CruiseSettings(.8),100.)
-        self.assertEqual(result[:2],(0.,0.));self.assertIn('后',result[2])
+        self.assertGreater(result[0],0.);self.assertNotEqual(result[1],0.)
         result=CruisePolicy().decide(view(2.,rear=.2),CruiseSettings(.8),100.)
         self.assertGreater(result[0],0.);self.assertEqual(result[1],0.);self.assertFalse(result[3])
 
@@ -203,8 +215,9 @@ class PolicyTests(unittest.TestCase):
         for sequence in range(2,5):
             now=100.+sequence*.1
             result=policy.decide(view(2.,rear=.5,now=now,sequence=sequence),settings,now)
-            self.assertGreater(result[0],0.);self.assertEqual(result[1],0.);self.assertFalse(result[3])
+            self.assertGreater(result[0],0.);self.assertFalse(result[3])
         self.assertEqual(policy.phase,'forward')
+        self.assertEqual(result[1],0.)
 
     def test_front_clear_alone_does_not_end_side_avoidance(self):
         policy=CruisePolicy();settings=CruiseSettings(side_distance=.5)
@@ -227,7 +240,7 @@ class PolicyTests(unittest.TestCase):
         for speed in (.02,.03,.06,.15):
             vx,wz,_,fatal=CruisePolicy().decide(view(.4),CruiseSettings(.6,speed),100.)
             self.assertGreater(vx,0.);self.assertLessEqual(vx,speed)
-            self.assertEqual(abs(wz),.4);self.assertFalse(fatal)
+            self.assertIn(abs(wz),(.15,.25,.4));self.assertFalse(fatal)
 
     def test_simulated_car_clears_box_then_continues_forward_without_collision(self):
         # Ray cast against a 20 cm box centered at (1,0), and a 4x4 m room.
@@ -296,7 +309,7 @@ class RunnerTests(unittest.TestCase):
         command=self.sent[-1]
         self.assertGreater(command['linear']['x'],0.)
         self.assertEqual(command['linear']['y'],0.)
-        self.assertEqual(abs(command['angular']['z']),.4)
+        self.assertIn(abs(command['angular']['z']),(.15,.25,.4))
 
     def test_manual_stop_no_later_movement_and_reconfigure(self):
         self.runner.start(CruiseSettings());self.runner.configure(CruiseSettings(.8,.08))
@@ -309,6 +322,16 @@ class RunnerTests(unittest.TestCase):
         app.features=[types.SimpleNamespace(on_ros_message=lambda topic,msg,when:self.monitor.update(msg,when))]
         App._on_ros_message(app,'/scan_raw',scan_message(sequence=2),88.)
         self.assertEqual(self.monitor.snapshot()['received_at'],88.)
+
+    def test_slow_trajectory_calculation_cannot_publish_an_expired_decision(self):
+        def slow_decision(*args):
+            self.now=101.
+            return .04,.15,'turn',False
+        self.runner.policy.decide=slow_decision;self.runner.running=True
+        self.runner.step()
+        self.assertFalse(self.runner.running)
+        self.assertEqual(self.sent[-1]['linear']['x'],0.)
+        self.assertIn('轨迹检查期间',self.runner.phase)
 
 
 class CruiseConfigTests(unittest.TestCase):

@@ -5,6 +5,7 @@ import threading
 import time
 import tkinter as tk
 from datetime import datetime
+from dataclasses import asdict
 
 from carapp.config import save_config
 from carapp.core.cruise import CruisePolicy, CruiseRunner, CruiseSettings
@@ -83,7 +84,7 @@ class CruiseFeature(Feature):
         self.sensor = tk.Label(panel, text="雷达：等待 /scan_raw", bg=theme.PANEL,
                                fg=theme.TEXT_DIM, font=theme.FONT_SMALL, anchor="w")
         self.sensor.pack(fill="x")
-        hint = tk.Label(panel, text="左右分别检查前侧通路和对侧车尾空间，受阻时先停车，连续 3 帧确认后换向；"
+        hint = tk.Label(panel, text="按含夹爪的车体轮廓检查前进转弯轨迹，自动选择缓转/中转/急转；受阻停车，连续 3 帧确认后换向。"
                             "停车至少 0.3 秒，换向间隔至少 1 秒。单次绕障总限时 20 秒；切页、失焦、数据失效会取消巡航。",
                  bg=theme.PANEL, fg=theme.TEXT_DIM, font=theme.FONT_SMALL,
                  wraplength=1050, justify="left", anchor="w")
@@ -208,6 +209,7 @@ class CruiseFeature(Feature):
                 self.record_camera.stop_record()
             path = self.record_dir
             report = dict(host=self.ctx.cfg["car"]["host"], settings=self.runner.settings.__dict__,
+                          vehicle_geometry=asdict(self.runner.geometry),
                           events=self.events, result=self.runner.phase, vehicle_files_modified=[])
             try:
                 with open(os.path.join(path, "运行记录.json"), "w", encoding="utf-8") as out:

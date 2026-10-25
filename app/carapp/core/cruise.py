@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from carapp.core.laser_scan import LaserMonitor
 from carapp.core.cruise_turning import TurnSelector
+from carapp.core.cruise_geometry import VehicleGeometry, evaluate_motion, load_vehicle_geometry
 
 
 @dataclass(frozen=True)
@@ -28,10 +29,11 @@ class CruisePolicy:
     TURN_SPEED = .40
     ARC_SPEED = .04
 
-    def __init__(self):
+    def __init__(self, geometry=None):
+        self.geometry = geometry or VehicleGeometry()
         self.phase = "forward"
         self.avoid_started = None
-        self.turning = TurnSelector()
+        self.turning = TurnSelector(self.geometry)
         self.clear_count = 0
         self.last_sequence = None
         self.last_now = None
@@ -60,14 +62,16 @@ class CruisePolicy:
             return 0., 0., "左右雷达数据不足，已停止，请重新启动", True
         side_limit = settings.side_distance
         # An obstacle already behind the axle must not cause another turn toward it.
-        # Full side sectors still guard rotation; forward sectors decide whether to steer away.
+        # Forward sectors trigger avoidance; the full footprint checks every candidate.
         side_alert = min(ahead_sides) < side_limit
         if self.phase == "forward":
             if front >= settings.front_back_distance and not side_alert:
                 speed = settings.speed if front >= settings.front_back_distance+.20 else min(settings.speed, .06)
                 if front < .50:
                     speed = min(speed, .03)
-                return speed, 0., "自动前进" if speed == settings.speed else "前方接近障碍，慢速前进", False
+                for candidate_speed in dict.fromkeys((speed, min(speed, .02))):
+                    if evaluate_motion(scan, candidate_speed, 0., self.geometry).clear:
+                        return candidate_speed, 0., "自动前进" if candidate_speed == settings.speed else "前方接近障碍，慢速前进", False
             self.phase, self.avoid_started = "avoid", now
         if self.avoid_started is not None and now-self.avoid_started >= self.AVOID_TIMEOUT:
             return 0., 0., "20 秒内未找到绕行通道，已停止", True
@@ -76,25 +80,33 @@ class CruisePolicy:
             clear = front >= settings.front_back_distance+.08 and min(ahead_sides) >= side_limit+.03
             self.clear_count = self.clear_count+1 if clear else 0
         if self.clear_count >= 3:
-            self.phase = "forward"
-            self.avoid_started = None
-            self.turning = TurnSelector()
-            self.clear_count = 0
-            return self.decide(scan, settings, now)
+            # Clearing a distance threshold alone cannot overrule a blocked body trajectory.
+            straight = evaluate_motion(scan, min(settings.speed, .06), 0., self.geometry)
+            if not straight.clear:
+                self.clear_count = 0
+            else:
+                self.turning = TurnSelector(self.geometry)
+                self.clear_count = 0
+                self.phase = "forward"
+                self.avoid_started = None
+                return self.decide(scan, settings, now)
         # If an already-passed side obstacle blocks rotation, a separately checked
         # full-width forward corridor can still permit driving away without turning.
         corridor = scan.get("straight_corridor")
         straight_clear = front >= settings.front_back_distance and not side_alert
         if "straight_corridor" in scan:
             straight_clear = front >= settings.front_back_distance and corridor is not None and corridor >= settings.front_back_distance
-        direction, text = self.turning.choose(scan, settings, now, straight_clear=straight_clear)
+        speed = min(settings.speed, self.ARC_SPEED, .02 if front < .45 else self.ARC_SPEED)
+        straight_clear = straight_clear and evaluate_motion(scan, speed, 0., self.geometry).clear
+        direction, text = self.turning.choose(scan, settings, now, straight_clear=straight_clear,
+                                               speed=speed, prefer_straight=not side_alert)
         if direction is None:
             return 0., 0., text, False
-        speed = min(settings.speed, self.ARC_SPEED, .02 if front < .45 else self.ARC_SPEED)
         if direction == "straight":
             return speed, 0., text, False
-        wz = self.TURN_SPEED * (1 if direction == "left" else -1)
-        return speed, wz, "前进向%s转弯绕障" % ("左" if wz > 0 else "右"), False
+        motion = self.turning.motion
+        return motion.speed, motion.yaw, "前进向%s转弯绕障（%s）" % (
+            "左" if motion.yaw > 0 else "右", {.15:"缓转", .25:"中转", .4:"急转"}[abs(motion.yaw)]), False
 
 
 class CruiseRunner:
@@ -106,6 +118,7 @@ class CruiseRunner:
         self.thread = None
         self.running = False
         self.settings = CruiseSettings()
+        self.geometry = VehicleGeometry()
         self.phase = "待机"
         self.policy = CruisePolicy()
 
@@ -117,7 +130,7 @@ class CruiseRunner:
     def configure(self, settings):
         with self.lock:
             self.settings = settings
-            self.policy = CruisePolicy()
+            self.policy = CruisePolicy(self.geometry)
             if self.running:
                 self.ctx.stop_base()
                 self._phase("参数已更新，重新评估障碍")
@@ -128,13 +141,15 @@ class CruiseRunner:
                 raise ValueError("巡航已启动或上次动作正在停止")
             if not self.ctx.state.get("ws_connected"):
                 raise ValueError("ROS 尚未连接")
+            self.geometry = load_vehicle_geometry()
+            self.monitor.set_geometry(self.geometry)
             scan = self.monitor.snapshot()
-            check = CruisePolicy().decide(scan, settings, self.clock())
+            check = CruisePolicy(self.geometry).decide(scan, settings, self.clock())
             if check[3]:
                 raise ValueError(check[2])
             if not self.ctx.state.get("cam_connected"):
                 raise ValueError("请等待实时画面就绪后再启动巡航")
-            self.settings, self.policy = settings, CruisePolicy()
+            self.settings, self.policy = settings, CruisePolicy(self.geometry)
             self.cancel = threading.Event()
             self.running = True
             self.ctx.stop_base()
@@ -151,7 +166,10 @@ class CruiseRunner:
             elif not self.ctx.state.get("cam_connected"):
                 decision = (0., 0., "实时画面中断，已取消巡航", True)
             else:
-                decision = self.policy.decide(self.monitor.snapshot(), self.settings, self.clock())
+                scan = self.monitor.snapshot()
+                decision = self.policy.decide(scan, self.settings, self.clock())
+                if self.clock()-scan.get("received_at",0.) > LaserMonitor.TIMEOUT:
+                    decision = (0., 0., "轨迹检查期间雷达数据已超时，已取消巡航", True)
             vx, wz, text, fatal = decision
             if fatal:
                 self.running = False
@@ -176,8 +194,9 @@ class CruiseRunner:
     def _run(self):
         try:
             while not self.cancel.is_set():
+                started = time.monotonic()
                 self.step()
-                self.cancel.wait(.10)
+                self.cancel.wait(max(0., .10-(time.monotonic()-started)))
         except Exception as exc:
             with self.lock:
                 self.running = False

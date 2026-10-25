@@ -1,0 +1,18 @@
+{
+  "source": "用户于2026-10-25实测车宽17cm、雷达到夹爪前端22cm、雷达到车尾9cm；雷达相对底盘原点偏移取厂家CAD",
+  "measurement_confirmed": true,
+  "geometry": {
+    "front": 0.1875643963119436,
+    "rear": 0.1224356036880564,
+    "half_width": 0.085,
+    "lidar_x": -0.0324356036880564,
+    "lidar_y": 0.0,
+    "lidar_yaw": 0.0,
+    "margin": 0.02,
+    "prediction_seconds": 2.0,
+    "control_delay": 0.25,
+    "linear_deceleration": 0.25,
+    "angular_deceleration": 0.8
+  },
+  "notes": "长度单位米；轮廓为包含夹爪的保守矩形。2cm为几何余量；延迟和减速度为待实车验证的估计，不是实测制动性能。"
+}

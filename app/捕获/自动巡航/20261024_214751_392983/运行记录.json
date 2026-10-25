@@ -1,0 +1,491 @@
+{
+  "host": "192.168.150.2",
+  "settings": {
+    "front_back_distance": 0.3,
+    "speed": 0.06,
+    "side_distance": 0.2
+  },
+  "events": [
+    {
+      "time": 1792849671.3951156,
+      "phase": "巡航已启动",
+      "scan": {
+        "received_at": 41445.6535822,
+        "error": "",
+        "coverage": {
+          "front": 0.8910891089108911,
+          "left": 0.9590163934426229,
+          "right": 0.9508196721311475,
+          "rear": 0.9493670886075949,
+          "left_ahead": 0.9508196721311475,
+          "right_ahead": 0.9344262295081968,
+          "left_front": 0.9702970297029703,
+          "right_front": 0.8613861386138614,
+          "left_rear": 0.98,
+          "right_rear": 0.9405940594059405,
+          "straight_corridor": 0.9154228855721394
+        },
+        "front": 0.6464603811607731,
+        "left": 0.4320000112056732,
+        "right": 0.3889999985694885,
+        "rear": 0.6980000138282776,
+        "left_ahead": 0.4320000112056732,
+        "right_ahead": 0.6819999814033508,
+        "left_front": 0.4320000112056732,
+        "right_front": 0.6579999923706055,
+        "left_rear": 0.44200000166893005,
+        "right_rear": 0.3889999985694885,
+        "straight_corridor": 0.6464603811607731,
+        "sequence": 513
+      },
+      "pose": [
+        0.8638847970214809,
+        0.16721942303704823,
+        7.820367437101261
+      ],
+      "base": [
+        0.0,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {},
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849671.3968182,
+      "phase": "自动前进",
+      "scan": {
+        "received_at": 41445.6535822,
+        "error": "",
+        "coverage": {
+          "front": 0.8910891089108911,
+          "left": 0.9590163934426229,
+          "right": 0.9508196721311475,
+          "rear": 0.9493670886075949,
+          "left_ahead": 0.9508196721311475,
+          "right_ahead": 0.9344262295081968,
+          "left_front": 0.9702970297029703,
+          "right_front": 0.8613861386138614,
+          "left_rear": 0.98,
+          "right_rear": 0.9405940594059405,
+          "straight_corridor": 0.9154228855721394
+        },
+        "front": 0.6464603811607731,
+        "left": 0.4320000112056732,
+        "right": 0.3889999985694885,
+        "rear": 0.6980000138282776,
+        "left_ahead": 0.4320000112056732,
+        "right_ahead": 0.6819999814033508,
+        "left_front": 0.4320000112056732,
+        "right_front": 0.6579999923706055,
+        "left_rear": 0.44200000166893005,
+        "right_rear": 0.3889999985694885,
+        "straight_corridor": 0.6464603811607731,
+        "sequence": 513
+      },
+      "pose": [
+        0.8638847970214809,
+        0.16721942303704823,
+        7.820367437101261
+      ],
+      "base": [
+        0.06,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {},
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849674.0311778,
+      "phase": "前方接近障碍，慢速前进",
+      "scan": {
+        "received_at": 41448.4478447,
+        "error": "",
+        "coverage": {
+          "front": 0.9,
+          "left": 0.967479674796748,
+          "right": 0.926829268292683,
+          "rear": 0.948051948051948,
+          "left_ahead": 0.9672131147540983,
+          "right_ahead": 0.9032258064516129,
+          "left_front": 0.98,
+          "right_front": 0.8613861386138614,
+          "left_rear": 0.98,
+          "right_rear": 0.93,
+          "straight_corridor": 0.92
+        },
+        "front": 0.4899102235877921,
+        "left": 0.37400001287460327,
+        "right": 0.4560000002384186,
+        "rear": 0.8420000076293945,
+        "left_ahead": 0.37400001287460327,
+        "right_ahead": 0.6349999904632568,
+        "left_front": 0.37400001287460327,
+        "right_front": 0.5019999742507935,
+        "left_rear": 0.46799999475479126,
+        "right_rear": 0.4560000002384186,
+        "straight_corridor": 0.4899102235877921,
+        "sequence": 531
+      },
+      "pose": [
+        1.0137671804458424,
+        0.187468165720816,
+        8.065859042034484
+      ],
+      "base": [
+        0.03,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {},
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849679.8347561,
+      "phase": "前进向左转弯绕障",
+      "scan": {
+        "received_at": 41454.2312997,
+        "error": "",
+        "coverage": {
+          "front": 0.9108910891089109,
+          "left": 0.967479674796748,
+          "right": 0.9186991869918699,
+          "rear": 0.9615384615384616,
+          "left_ahead": 0.9838709677419355,
+          "right_ahead": 0.9354838709677419,
+          "left_front": 0.9900990099009901,
+          "right_front": 0.8811881188118812,
+          "left_rear": 0.97,
+          "right_rear": 0.91,
+          "straight_corridor": 0.9353233830845771
+        },
+        "front": 0.29552810389858913,
+        "left": 0.4300000071525574,
+        "right": 0.5640000104904175,
+        "rear": 1.0240000486373901,
+        "left_ahead": 0.4569999873638153,
+        "right_ahead": 0.5690000057220459,
+        "left_front": 0.4569999873638153,
+        "right_front": 0.3140000104904175,
+        "left_rear": 0.4300000071525574,
+        "right_rear": 0.5640000104904175,
+        "straight_corridor": 0.29552810389858913,
+        "sequence": 567
+      },
+      "pose": [
+        1.1862603252544082,
+        0.21221961949582158,
+        8.052273031519693
+      ],
+      "base": [
+        0.02,
+        0.4
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": "left",
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": 41454.3082806,
+        "options": {
+          "left": {
+            "clear": true,
+            "reason": "通路可行",
+            "front": 0.4569999873638153,
+            "side": 0.4300000071525574,
+            "tail": 0.5640000104904175,
+            "tail_region": "right_rear",
+            "can_start": true,
+            "start_reason": "通路可行"
+          },
+          "right": {
+            "clear": true,
+            "reason": "通路可行",
+            "front": 0.3140000104904175,
+            "side": 0.5640000104904175,
+            "tail": 0.4300000071525574,
+            "tail_region": "left_rear",
+            "can_start": true,
+            "start_reason": "通路可行"
+          }
+        },
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849681.692937,
+      "phase": "自动前进",
+      "scan": {
+        "received_at": 41456.0236028,
+        "error": "",
+        "coverage": {
+          "front": 0.98,
+          "left": 0.967479674796748,
+          "right": 0.8699186991869918,
+          "rear": 0.922077922077922,
+          "left_ahead": 0.9508196721311475,
+          "right_ahead": 0.8064516129032258,
+          "left_front": 0.97,
+          "right_front": 0.8811881188118812,
+          "left_rear": 0.96,
+          "right_rear": 0.93,
+          "straight_corridor": 0.925
+        },
+        "front": 0.5541467959567137,
+        "left": 0.3869999945163727,
+        "right": 0.2759999930858612,
+        "rear": 0.5920000076293945,
+        "left_ahead": 0.3869999945163727,
+        "right_ahead": 0.2759999930858612,
+        "left_front": 0.3869999945163727,
+        "right_front": 0.2759999930858612,
+        "left_rear": 0.6100000143051147,
+        "right_rear": 0.5550000071525574,
+        "straight_corridor": 0.5541467959567137,
+        "sequence": 577
+      },
+      "pose": [
+        1.2209227582504496,
+        0.2291218727435655,
+        47.44356982884053
+      ],
+      "base": [
+        0.06,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {},
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849682.021056,
+      "phase": "前方接近障碍，慢速前进",
+      "scan": {
+        "received_at": 41456.4248997,
+        "error": "",
+        "coverage": {
+          "front": 0.9900990099009901,
+          "left": 0.9672131147540983,
+          "right": 0.9016393442622951,
+          "rear": 0.9113924050632911,
+          "left_ahead": 0.9508196721311475,
+          "right_ahead": 0.8852459016393442,
+          "left_front": 0.9702970297029703,
+          "right_front": 0.9306930693069307,
+          "left_rear": 0.96,
+          "right_rear": 0.9108910891089109,
+          "straight_corridor": 0.9502487562189055
+        },
+        "front": 0.49785934166333123,
+        "left": 0.35600000619888306,
+        "right": 0.26100000739097595,
+        "rear": 0.6110000014305115,
+        "left_ahead": 0.35600000619888306,
+        "right_ahead": 0.26100000739097595,
+        "left_front": 0.35600000619888306,
+        "right_front": 0.26100000739097595,
+        "left_rear": 0.6110000014305115,
+        "right_rear": 0.5659999847412109,
+        "straight_corridor": 0.49785934166333123,
+        "sequence": 580
+      },
+      "pose": [
+        1.2335003897297347,
+        0.24499972822654822,
+        52.89850423480066
+      ],
+      "base": [
+        0.03,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {},
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849688.2422783,
+      "phase": "左右均不可行，停车等待（左：右后空间不足；右：左后空间不足）",
+      "scan": {
+        "received_at": 41462.6943285,
+        "error": "",
+        "coverage": {
+          "front": 0.98,
+          "left": 0.975609756097561,
+          "right": 0.8861788617886179,
+          "rear": 0.8961038961038961,
+          "left_ahead": 0.9836065573770492,
+          "right_ahead": 0.9032258064516129,
+          "left_front": 0.99,
+          "right_front": 0.9306930693069307,
+          "left_rear": 0.95,
+          "right_rear": 0.87,
+          "straight_corridor": 0.96
+        },
+        "front": 0.2969092409438764,
+        "left": 0.28299999237060547,
+        "right": 0.27399998903274536,
+        "rear": 0.800000011920929,
+        "left_ahead": 0.31200000643730164,
+        "right_ahead": 0.8090000152587891,
+        "left_front": 0.31200000643730164,
+        "right_front": 0.5220000147819519,
+        "left_rear": 0.28299999237060547,
+        "right_rear": 0.27399998903274536,
+        "straight_corridor": 0.2969092409438764,
+        "sequence": 614
+      },
+      "pose": [
+        1.349635151974358,
+        0.4002641455677932,
+        53.56970612514574
+      ],
+      "base": [
+        0.0,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {
+          "left": {
+            "clear": false,
+            "reason": "右后空间不足",
+            "front": 0.31200000643730164,
+            "side": 0.28299999237060547,
+            "tail": 0.27399998903274536,
+            "tail_region": "right_rear",
+            "can_start": false,
+            "start_reason": "右后空间不足"
+          },
+          "right": {
+            "clear": false,
+            "reason": "左后空间不足",
+            "front": 0.5220000147819519,
+            "side": 0.27399998903274536,
+            "tail": 0.28299999237060547,
+            "tail_region": "left_rear",
+            "can_start": false,
+            "start_reason": "左后空间不足"
+          }
+        },
+        "avoid_elapsed": 0.0
+      }
+    },
+    {
+      "time": 1792849708.3173718,
+      "phase": "20 秒内未找到绕行通道，已停止",
+      "scan": {
+        "received_at": 41482.7897391,
+        "error": "",
+        "coverage": {
+          "front": 0.9797979797979798,
+          "left": 0.9672131147540983,
+          "right": 0.8688524590163934,
+          "rear": 0.9358974358974359,
+          "left_ahead": 0.9836065573770492,
+          "right_ahead": 0.9016393442622951,
+          "left_front": 0.99,
+          "right_front": 0.93,
+          "left_rear": 0.95,
+          "right_rear": 0.87,
+          "straight_corridor": 0.9597989949748744
+        },
+        "front": 0.2917206351408722,
+        "left": 0.2809999883174896,
+        "right": 0.2759999930858612,
+        "rear": 0.4359999895095825,
+        "left_ahead": 0.3109999895095825,
+        "right_ahead": 0.8090000152587891,
+        "left_front": 0.3109999895095825,
+        "right_front": 0.5199999809265137,
+        "left_rear": 0.2809999883174896,
+        "right_rear": 0.2759999930858612,
+        "straight_corridor": 0.2917206351408722,
+        "sequence": 725
+      },
+      "pose": [
+        1.349805173204606,
+        0.40049599850432416,
+        53.666915086176665
+      ],
+      "base": [
+        0.0,
+        0.0
+      ],
+      "lateral": 0.0,
+      "turn_decision": {
+        "direction": null,
+        "candidate": null,
+        "confirmations": 0,
+        "blocked_at": null,
+        "last_change": null,
+        "options": {
+          "left": {
+            "clear": false,
+            "reason": "右后空间不足",
+            "front": 0.3109999895095825,
+            "side": 0.2840000092983246,
+            "tail": 0.27399998903274536,
+            "tail_region": "right_rear",
+            "can_start": false,
+            "start_reason": "右后空间不足"
+          },
+          "right": {
+            "clear": false,
+            "reason": "左后空间不足",
+            "front": 0.5180000066757202,
+            "side": 0.27399998903274536,
+            "tail": 0.2840000092983246,
+            "tail_region": "left_rear",
+            "can_start": false,
+            "start_reason": "左后空间不足"
+          }
+        },
+        "avoid_elapsed": 20.07398519999697
+      }
+    }
+  ],
+  "result": "20 秒内未找到绕行通道，已停止",
+  "vehicle_files_modified": []
+}

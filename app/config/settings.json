@@ -156,9 +156,9 @@
     }
   },
   "cruise": {
-    "front_back_distance": 0.2,
-    "side_distance": 0.1,
-    "speed": 0.06
+    "front_back_distance": 0.4,
+    "side_distance": 0.2,
+    "speed": 0.15
   },
   "terminal": {
     "port": 22,

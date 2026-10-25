@@ -1,6 +1,7 @@
 """Directional turn checks and bounded, fresh-scan confirmation when changing direction."""
-import math
 from dataclasses import asdict, dataclass
+
+from carapp.core.cruise_geometry import MotionCheck, VehicleGeometry, check_turns
 
 
 @dataclass(frozen=True)
@@ -11,26 +12,25 @@ class TurnClearance:
     side: float | None
     tail: float | None
     tail_region: str
+    motion: MotionCheck | None = None
+    candidates: tuple = ()
 
 
-def assess_turns(scan, settings, margin=0.):
-    """Left arcs need right-rear swing room; right arcs need left-rear swing room."""
+def assess_turns(scan, settings, margin=0., geometry=None, *, speed=None):
+    """Distances describe the scene; only swept trajectories approve a turn."""
+    speed = min(settings.speed, .04, .02 if (scan.get("front") or 0.) < .45 else .04) if speed is None else speed
+    candidates = check_turns(scan, speed, geometry, margin)
     result = {}
-    for direction, front_key, tail_key, name, tail_name in (
-        ("left", "left_front", "right_rear", "左", "右后"),
-        ("right", "right_front", "left_rear", "右", "左后"),
+    for direction, front_key, tail_key in (
+        ("left", "left_front", "right_rear"),
+        ("right", "right_front", "left_rear"),
     ):
         front, side, tail = scan.get(front_key), scan.get(direction), scan.get(tail_key)
-        reasons = []
-        for label, value, threshold in ((name+"前", front, settings.side_distance+margin),
-                                         (name+"侧", side, settings.side_distance+margin),
-                                         (tail_name, tail, settings.front_back_distance+margin)):
-            if not isinstance(value, (float, int)) or isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-                reasons.append(label+"数据不足")
-            elif value <= threshold:
-                reasons.append(label+"空间不足")
-        result[direction] = TurnClearance(not reasons, "、".join(reasons) or "通路可行",
-                                          front, side, tail, tail_key)
+        options = candidates[direction]
+        selected = next((item for item in options if item.clear), None)
+        reason = "轨迹可行" if selected else "、".join(dict.fromkeys(item.reason for item in options))
+        result[direction] = TurnClearance(selected is not None, reason, front, side, tail, tail_key,
+                                          selected, options)
     return result
 
 
@@ -39,9 +39,11 @@ class TurnSelector:
     PAUSE_SECONDS = .30
     CHANGE_INTERVAL = 1.
     CONFIRM_FRAMES = 3
-    ENTRY_MARGIN = .03
+    ENTRY_MARGIN = .01  # added to the measured footprint's 2 cm geometric margin
 
-    def __init__(self):
+    def __init__(self, geometry=None):
+        self.geometry = geometry or VehicleGeometry()
+        self.motion = None
         self.direction = None
         self.last_change = None
         self.blocked_at = None
@@ -59,24 +61,34 @@ class TurnSelector:
         return "左右均不可行，停车等待（左：%s；右：%s）" % (
             self.entries["left"].reason, self.entries["right"].reason)
 
-    def choose(self, scan, settings, now, straight_clear=False):
-        self.options = assess_turns(scan, settings)
-        self.entries = assess_turns(scan, settings, self.ENTRY_MARGIN)
+    def _use(self, direction, item):
+        # Keep the current curvature while it is clear; try another magnitude on
+        # this side before declaring the direction blocked.
+        same = next((option for option in item.candidates if option.clear and self.motion
+                     and option.yaw == self.motion.yaw), None)
+        self.motion = same or item.motion
+        return direction, ""
+
+    def choose(self, scan, settings, now, straight_clear=False, *, speed=None, prefer_straight=False):
+        self.options = assess_turns(scan, settings, geometry=self.geometry, speed=speed)
+        self.entries = assess_turns(scan, settings, self.ENTRY_MARGIN, self.geometry, speed=speed)
         if self.direction is None:
+            if straight_clear and prefer_straight:
+                return "straight", "前方轨迹恢复可见，低速直行确认"
             # Like the vendor's app.lidar_controller avoidance, compare the two
             # front halves first. Side width only breaks ties after all entry
             # checks (including the opposite tail) have passed.
-            available = [(item.front, item.side, direction)
+            available = [(item.front or 0., item.side or 0., direction)
                          for direction, item in self.entries.items() if item.clear]
             if not available:
                 return ("straight", "转弯空间受限，保持前进直行") if straight_clear else (None, self._both_blocked())
             self.direction = max(available)[2]
             self.last_change = now
-            return self.direction, ""
+            return self._use(self.direction, self.entries[self.direction])
 
         current = self.options[self.direction]
         if current.clear and self.blocked_at is None:
-            return self.direction, ""
+            return self._use(self.direction, current)
         if not current.clear and straight_clear:
             self._clear_confirmation()
             return "straight", "转弯空间受限，保持前进直行"
@@ -101,7 +113,7 @@ class TurnSelector:
             if changing:
                 self.last_change = now
             self._clear_confirmation()
-            return self.direction, ""
+            return self._use(self.direction, self.entries[self.direction] if changing else current)
         if candidate is None:
             return None, self._both_blocked()
         name = "左" if candidate == "left" else "右"
@@ -114,6 +126,7 @@ class TurnSelector:
 
     def snapshot(self):
         return dict(direction=self.direction, candidate=self.candidate, confirmations=self.confirmations,
+                    motion=asdict(self.motion) if self.motion else None,
                     blocked_at=self.blocked_at, last_change=self.last_change,
                     options={direction:dict(asdict(item), can_start=self.entries[direction].clear,
                                             start_reason=self.entries[direction].reason)
