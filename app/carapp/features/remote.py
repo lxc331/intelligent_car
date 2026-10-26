@@ -67,7 +67,7 @@ class RemoteFeature(Feature):
                          padx=10, pady=6)
 
     def _build_mouse(self, parent):
-        left = tk.LabelFrame(parent, text="车轮 · 按住移动，松开停止（最长 5 秒）",
+        left = tk.LabelFrame(parent, text="车轮 · 按住持续移动，松开停止",
                              bg=theme.PANEL, fg=theme.TEXT_DIM, font=theme.FONT_SMALL,
                              padx=8, pady=6)
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
@@ -228,7 +228,7 @@ class RemoteFeature(Feature):
         if self.var_mode.get() == "keyboard":
             text = "键盘已启用：%s" % (keys or "等待按键，空格 / Esc 停止") if self._armed else "键盘未启用，请点击「点击启用键盘操控」。"
         else:
-            text = "鼠标模式：按住方向按钮移动，松开或移出按钮即停；底盘、云台单次最长 5 秒。"
+            text = "鼠标模式：按住方向按钮持续移动，松开或移出按钮即停；连续操控无时长限制。"
         self.status.config(text=text, fg=theme.OK if self._armed else theme.ACCENT)
         values = st.get("servo_targets") or {}
         names = self.ctx.cfg["servo"]["names"]

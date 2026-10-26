@@ -1,4 +1,4 @@
-"""Bounded teleoperation independent of Tk; one worker serializes all held inputs."""
+"""Hold-to-run teleoperation; one worker serializes all held inputs."""
 import math
 import threading
 import time
@@ -18,12 +18,10 @@ class TeleopController:
         self.lock = threading.RLock()
         self.pressed = set()
         self.blocked = set()
-        self.deadlines = {}
         self.last_twist = (0., 0., 0.)
         self.next_camera = 0.
         self.speed = .06
         self.turn = .4
-        self.max_seconds = min(5., max(.1, float(ctx.cfg.get("base", {}).get("jog_max_sec", 5.))))
         self.hz = min(30., max(5., float(ctx.cfg.get("base", {}).get("publish_hz", 10))))
         self.closed = threading.Event()
         self.thread = None
@@ -42,7 +40,7 @@ class TeleopController:
             return False
         with self.lock:
             if key in self.pressed or key in self.blocked:
-                return True  # OS key-repeat must not restart the deadline or a servo action.
+                return True  # OS key-repeat must not replay a servo action or undo a stop.
             if not self.ctx.state.get("ws_connected"):
                 self.ctx.log("遥控未执行：ROS 未连接")
                 return False
@@ -52,9 +50,7 @@ class TeleopController:
                 if not self.ctx.publish_servo({joint: self.ctx.cfg["servo"]["actions"][action]}, .8):
                     self._stop_locked()
             else:
-                group = "base" if key in BASE_KEYS else "camera"
-                self.deadlines.setdefault(group, self.clock() + self.max_seconds)
-                if group == "camera":
+                if key in CAMERA_KEYS:
                     self.next_camera = 0.
                 self._tick_locked(self.clock())
         return True
@@ -63,9 +59,6 @@ class TeleopController:
         with self.lock:
             self.pressed.discard(key)
             self.blocked.discard(key)
-            for group, keys in (("base", BASE_KEYS), ("camera", CAMERA_KEYS)):
-                if not self.pressed.intersection(keys):
-                    self.deadlines.pop(group, None)
             self._tick_locked(self.clock())
 
     def tick(self):
@@ -77,15 +70,6 @@ class TeleopController:
         if self.pressed and not self.ctx.state.get("ws_connected"):
             self._stop_locked()
             return
-        for group, keys in (("base", BASE_KEYS), ("camera", CAMERA_KEYS)):
-            if group in self.deadlines and now >= self.deadlines[group]:
-                expired = self.pressed.intersection(keys)
-                self.blocked.update(expired)
-                self.pressed.difference_update(keys)
-                self.deadlines.pop(group)
-                self.ctx.log("遥控%s已满 %.1f 秒，已停止；松开后重新按下可继续" %
-                             ("底盘" if group == "base" else "云台", self.max_seconds))
-
         keys = self.pressed
         sx, sy = int("w" in keys) - int("s" in keys), int("q" in keys) - int("e" in keys)
         scale = max(1., math.hypot(sx, sy))
@@ -122,7 +106,6 @@ class TeleopController:
     def _stop_locked(self):
         self.blocked.update(self.pressed)
         self.pressed.clear()
-        self.deadlines.clear()
         self.last_twist = (0., 0., 0.)
         self.ctx.stop_base()
 

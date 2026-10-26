@@ -1,0 +1,155 @@
+"""Page integration and independent motion gates; all communication is fake."""
+import copy
+import tempfile
+import time
+import tkinter as tk
+import types
+import unittest
+from unittest.mock import patch, Mock
+
+from carapp.config import DEFAULTS
+from carapp.features.base import AppContext
+from carapp.features.mapping import MappingFeature
+from carapp.model.state import CarState
+
+
+class Camera(tk.Frame):
+    def __init__(self, parent, ctx):
+        super().__init__(parent)
+    def on_tick(self, st):
+        pass
+    def on_close(self):
+        pass
+
+
+class Session:
+    def __init__(self):
+        self.state = dict(connected=True, running=True, owned=True, busy=False, operation="")
+        self.calls = []
+        self.closed = False
+    def snapshot(self):
+        return dict(self.state)
+    def submit(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return True
+    def close_async(self):
+        self.closed = True
+    def drain(self):
+        return []
+
+
+class MappingFeatureTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.logs, self.sent = [], []
+        self.state = CarState()
+        self.state.update(ws_connected=True, cam_connected=True)
+        self.app = types.SimpleNamespace(cfg=copy.deepcopy(DEFAULTS), state=self.state, root=self.root,
+            camera=None, features=[], frame_listeners=[], log=self.logs.append,
+            bridge=types.SimpleNamespace(publish=lambda topic,msg:self.sent.append(msg) or True))
+        self.feature = MappingFeature(AppContext(self.app))
+        with patch("carapp.features.mapping.MappingCamera", Camera), \
+             patch("carapp.features.mapping.local_password", return_value=""):
+            self.feature.build(self.root)
+        self.app.features = [self.feature]
+        self.feature.on_activate()
+        self.session = Session()
+        self.feature.session = self.session
+        self.feature.engaged = True
+        self.valid_map()
+
+    def valid_map(self):
+        now = time.monotonic()
+        self.feature.model.accept_map(dict(header=dict(frame_id="map"),data=[0]*100,
+            info=dict(width=10,height=10,resolution=.05,origin=dict(position=dict(x=0,y=0),
+                orientation=dict(x=0,y=0,z=0,w=1)))),now)
+        self.feature.model.accept_odom(dict(header=dict(frame_id="map"),child_frame_id="base_footprint",
+            pose=dict(pose=dict(position=dict(x=0,y=0),orientation=dict(x=0,y=0,z=0,w=1)))), now)
+        self.feature._scan_at = now
+
+    def tearDown(self):
+        self.feature.on_close()
+        self.root.destroy()
+
+    def test_motion_requires_current_map_pose_camera_and_exclusive_ownership(self):
+        self.assertTrue(self.feature._ready())
+        self.app.features.append(types.SimpleNamespace(motion_active=True))
+        self.assertFalse(self.feature._ready())
+        self.app.features.pop()
+        self.state.update(cam_connected=False)
+        self.assertFalse(self.feature._ready())
+        self.state.update(cam_connected=True)
+        self.feature._scan_at = time.monotonic()-2
+        self.assertFalse(self.feature._ready())
+        self.valid_map()
+        self.feature.model.reset()
+        self.assertFalse(self.feature._ready())
+
+    def test_background_save_blocks_motion_but_status_poll_does_not(self):
+        self.session.state.update(busy=True, operation="save_map")
+        self.assertFalse(self.feature._ready())
+        self.session.state["operation"] = "status"
+        self.assertTrue(self.feature._ready())
+        self.feature.on_deactivate()
+        self.assertFalse(self.feature._ready())
+
+    def test_save_uses_fixed_app_root_and_explicit_host_scope(self):
+        self.feature.remote_dir.set("/home/pi/maps")
+        self.feature.scope.set("小车宿主机")
+        self.feature.map_name.set("沙盘A")
+        original = copy.deepcopy(self.app.cfg["tracking_pick"])
+        with patch("carapp.features.mapping.save_config"):
+            self.feature.save_map()
+        args, kwargs = self.session.calls[-1]
+        self.assertEqual(args[:3], ("save_map", "/home/pi/maps", "沙盘A"))
+        self.assertEqual(args[3], str(self.feature.local_root))
+        self.assertEqual(self.feature.local_root.name, "savedMap")
+        self.assertEqual(kwargs, dict(scope="host", serialize=True))
+        self.assertEqual(original, self.app.cfg["tracking_pick"])
+
+    def test_partial_save_does_not_claim_double_destination_success(self):
+        self.feature._handle_event(dict(operation="save_map", result=dict(remote_dir="/saved/map"),
+                                        error="connection lost"))
+        self.assertIn("车端已保存", self.feature.status.cget("text"))
+        self.assertNotIn("双端保存完成", self.feature.status.cget("text"))
+
+    def test_disconnect_clears_old_vehicle_map_and_session(self):
+        self.feature.disconnect()
+        self.assertTrue(self.session.closed)
+        self.assertIsNone(self.feature.session)
+        self.assertIsNone(self.feature.model.snapshot()["grid"])
+        self.assertFalse(self.feature.motion_active)
+
+    def test_ros_disconnect_never_restarts_mapping(self):
+        self.feature._was_connected = True
+        st = self.state.snapshot()
+        st["ws_connected"] = False
+        self.feature.on_tick(st)
+        self.assertIsNone(self.feature.session)
+        self.assertFalse(any(args[0] == "start" for args, _ in self.session.calls))
+
+    def test_external_process_status_cannot_rearm_after_finish(self):
+        self.feature.finish()
+        self.assertFalse(self.feature.engaged)
+        self.session.state.update(running=True, owned=False)
+        self.assertFalse(self.feature._ready())
+
+    def test_failed_stop_is_not_reported_as_success(self):
+        self.feature._handle_event(dict(operation="stop",error=None,
+            result=dict(running=True, owned=True, status="stop_failed")))
+        self.assertIn("尚未停止", self.feature.status.cget("text"))
+
+    def test_camera_replacement_requires_explicit_reattach_and_keeps_slam(self):
+        record = Mock()
+        record.camera = object()
+        self.feature._record = record
+        self.feature.on_tick(self.state.snapshot())
+        self.assertFalse(self.feature.engaged)
+        self.assertIsNone(self.feature._record)
+        record.finish.assert_called_once()
+        self.assertFalse(any(args[0] == "stop" for args, _ in self.session.calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

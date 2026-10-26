@@ -142,7 +142,7 @@ class GripperFeature(Feature):
 
     # ---- 车轮 ----
     def _build_wheels(self, parent):
-        box = self._section(parent, "车轮（按住方向键走，松开即停；单次最长 5 秒）")
+        box = self._section(parent, "车轮（按住持续移动，松开即停）")
         controls = tk.Frame(box, bg=theme.PANEL)
         controls.pack(fill="x")
         extras = tk.Frame(box, bg=theme.PANEL)
@@ -314,7 +314,7 @@ class GripperFeature(Feature):
         return float(self.base_cfg.get("turn_speed", 0.40))
 
     def jog(self, sx, sz, *, sy=0):
-        """按住方向键：起一条 10Hz 的发布线程，直到松开/超时。"""
+        """按住方向键：起一条发布线程，直到松开、主动停止或发送失败。"""
         if self._busy:
             self.ctx.log("序列执行中，先「中止」才能手动移动")
             return
@@ -327,16 +327,11 @@ class GripperFeature(Feature):
         vx = sx * self._speed()
         vy = sy * self._speed()
         wz = sz * self._turn()
-        max_sec = float(self.base_cfg.get("jog_max_sec", 5.0))
         hz = int(self.base_cfg.get("publish_hz", 10))
 
         def worker():
-            t0 = time.monotonic()
             try:
                 while not ev.is_set():
-                    if time.monotonic() - t0 >= max_sec:
-                        self.ctx.log("单次移动已满 %.0f 秒，自动停车" % max_sec)
-                        break
                     if not self.ctx.publish_twist(vx, wz, quiet=True, vy=vy):
                         break
                     ev.wait(1.0 / hz)

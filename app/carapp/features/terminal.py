@@ -11,19 +11,9 @@ from tkinter import ttk
 
 from carapp.config import APP_DIR
 from carapp.core.ssh_session import SSHSession
+from carapp.core.credentials import local_password as local_login
 from carapp.features.base import Feature
 from carapp.ui import theme
-
-
-def local_login():
-    """Optional existing PC credential file; never copied to settings or logs."""
-    path=os.path.join(os.path.dirname(APP_DIR),"小车账号密码信息.txt")
-    try:
-        with open(path,encoding="utf-8-sig") as f:
-            match=re.search(r"密码\s*[：:]\s*([^\s（(]+)",f.read())
-        return match.group(1) if match else ""
-    except OSError:
-        return ""
 
 
 class TerminalFeature(Feature):

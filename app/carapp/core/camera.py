@@ -121,6 +121,12 @@ class CameraStream(threading.Thread):
     def recording(self):
         return self._rec_dir is not None
 
+    @property
+    def record_path(self):
+        """Current PC recording identity, for features which share this stream."""
+        with self._lock:
+            return self._rec_dir
+
     # ---------- 主循环 ----------
     def run(self):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

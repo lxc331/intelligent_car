@@ -47,9 +47,8 @@ DEFAULTS = {
         "default_level": "慢",
         # 转向角速度 (rad/s)
         "turn_speed": 0.40,
-        # 按住方向键时的发布频率与单次最长时间（安全阀）
+        # 按住方向键时的发布频率
         "publish_hz": 10,
-        "jog_max_sec": 5.0,
         # 一键夹取序列里默认前进/后退时长（秒）
         "pick_forward_sec": 0.6,
         "pick_backward_sec": 0.4,
@@ -99,6 +98,8 @@ DEFAULTS = {
     "cruise": {"detection_distance": .60, "speed": .06, "mode": "avoid",
                "scan_angle": 90., "lidar_type": "standard"},
     "terminal": {"port": 22, "username": "pi", "auto_connect": True},
+    "mapping": {"remote_dir": "/home/ubuntu/ros2_ws/src/slam/maps",
+                "scope": "container", "serialize": True},
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
 

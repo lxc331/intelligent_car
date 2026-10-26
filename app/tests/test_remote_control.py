@@ -73,16 +73,16 @@ class TeleopTests(unittest.TestCase):
         self.controller.release('s')
         self.assertEqual(self.twist()['linear']['x'], .06)
 
-    def test_hold_timeout_and_repeat_do_not_restart_motion(self):
+    def test_holding_and_key_repeat_continue_beyond_five_seconds_until_release(self):
         self.controller.press('q')
-        self.now += 4.9; self.controller.press('q')
-        self.now += .2; self.controller.tick()
+        for held_seconds in (5.1, 60., 3600.):
+            self.now = 100. + held_seconds
+            self.controller.press('q')
+            self.controller.tick()
+            self.assertGreater(self.twist()['linear']['y'], 0)
+            self.assertEqual(self.controller.pressed, {'q'})
+        self.controller.release('q')
         self.assertEqual(self.twist()['linear']['y'], 0)
-        count = len(self.sent)
-        self.controller.press('q'); self.controller.tick()
-        self.assertEqual(len(self.sent), count)
-        self.controller.release('q'); self.controller.press('q')
-        self.assertGreater(self.twist()['linear']['y'], 0)
 
     def test_servo_endpoints_and_repeat_ignored(self):
         for key, channel, value in [('t',3,1200), ('g',3,1700), ('f',4,2000), ('h',4,1500)]:
@@ -101,7 +101,7 @@ class TeleopTests(unittest.TestCase):
             self.assertEqual(self.app.state.get('servo_targets')[joint], value)
             self.controller.release(key)
 
-    def test_camera_clamps_both_margins_and_timeout_stops_repeats(self):
+    def test_camera_clamps_both_margins_during_long_hold(self):
         self.app.state.update(servo_targets=dict(pitch=2240, yaw=660))
         self.controller.press('i'); self.controller.press('l')
         self.assertEqual(self.app.state.get('servo_targets'), dict(pitch=2250, yaw=650))
@@ -109,7 +109,21 @@ class TeleopTests(unittest.TestCase):
         count = len(self.servos())
         self.controller.press('i'); self.now += 1; self.controller.tick()
         self.assertEqual(len(self.servos()), count)
+        self.assertEqual(self.controller.pressed, {'i', 'l'})
+        self.controller.release('i'); self.controller.release('l')
         self.assertFalse(self.controller.pressed)
+
+    def test_camera_continues_after_five_seconds_and_release_stops_updates(self):
+        self.app.state.update(servo_targets=dict(pitch=1500, yaw=1500))
+        self.controller.press('j')
+        self.now += 6.
+        self.controller.tick()
+        self.assertEqual(self.app.state.get('servo_targets')['yaw'], 1580)
+        self.controller.release('j')
+        count = len(self.servos())
+        self.now += 60.
+        self.controller.tick()
+        self.assertEqual(len(self.servos()), count)
 
     def test_stop_disconnection_and_reconnection_never_resume(self):
         self.controller.press('w')
@@ -148,14 +162,25 @@ class TeleopTests(unittest.TestCase):
         self.assertEqual(len(self.sent), count)
         self.assertEqual(self.twist()['linear']['y'], 0.)
 
-    def test_watchdog_runs_without_tk_event_loop(self):
+    def test_worker_keeps_holding_then_stops_on_disconnect_without_tk_event_loop(self):
+        # Saved settings from older releases must not restore a time limit.
         self.app.cfg['base']['jog_max_sec'] = .1
         controller = TeleopController(self.ctx)
         try:
             controller.press('e')
             time.sleep(.25)
+            self.assertLess(self.twist()['linear']['y'], 0.)
+            self.assertEqual(controller.pressed, {'e'})
+            self.app.state.update(ws_connected=False)
+            deadline = time.monotonic() + 1.
+            while controller.pressed and time.monotonic() < deadline:
+                time.sleep(.01)
             self.assertEqual(self.twist()['linear']['y'], 0.)
             self.assertFalse(controller.pressed)
+            self.app.state.update(ws_connected=True)
+            count = len(self.sent)
+            time.sleep(.12)
+            self.assertEqual(len(self.sent), count)
         finally:
             controller.close()
 
@@ -214,11 +239,10 @@ class RemoteWidgetTests(unittest.TestCase):
     def test_repeat_release_pair_is_debounced_but_real_release_stops(self):
         self.arm()
         self.feature.key_press(self.event('q'))
-        deadline = self.feature.controller.deadlines['base']
         self.feature.key_release(self.event('q'))
         self.feature.key_press(self.event('q'))
         self.assertFalse(self.feature._releases)
-        self.assertEqual(self.feature.controller.deadlines['base'], deadline)
+        self.assertEqual(self.feature.controller.pressed, {'q'})
         self.feature.key_release(self.event('q'))
         self.root.after(35, self.root.quit); self.root.mainloop()
         self.assertEqual(self.app.state.get('base_vy'), 0.)
@@ -292,8 +316,8 @@ class AppLifecycleTests(unittest.TestCase):
             app.root.withdraw()
             try:
                 app.select_tab('remote'); app.root.update()
-                self.assertEqual([f.key for f in app.features], ['gripper','remote','cruise','terminal'])
-                self.assertEqual(len(app.frame_listeners), 4)  # three previews plus visual tracker
+                self.assertEqual([f.key for f in app.features], ['gripper','remote','cruise','mapping','terminal'])
+                self.assertEqual(len(app.frame_listeners), 6)  # four previews, visual tracker, mapping evidence
                 def descendants(widget):
                     for child in widget.winfo_children():
                         yield child
@@ -312,7 +336,8 @@ class AppLifecycleTests(unittest.TestCase):
                 self.assertFalse(remote._armed)
                 self.assertEqual(app.state.get('base_vy'), 0.)
                 self.assertFalse(app.root.bind('<KeyPress>'))
-                self.assertTrue(app.features[3].text.bind('<KeyPress>'))
+                terminal = next(f for f in app.features if f.key == 'terminal')
+                self.assertTrue(terminal.text.bind('<KeyPress>'))
                 app.select_tab('remote'); app.root.update()
                 self.assertFalse(remote._armed)
             finally:
@@ -347,8 +372,9 @@ class AppLifecycleTests(unittest.TestCase):
         app._closing = False; app._had_window_focus = True
         events = []
         app.features = [types.SimpleNamespace(stop_all=lambda:events.append('stop'))]
-        app.root = types.SimpleNamespace(focus_get=lambda:None)
-        app._check_window_focus()
+        app.root = object()
+        with patch('carapp.main.window_has_focus', return_value=False):
+            app._check_window_focus()
         self.assertEqual(events, ['stop'])
         self.assertFalse(app._had_window_focus)
 

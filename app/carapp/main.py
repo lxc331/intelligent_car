@@ -28,6 +28,7 @@ from carapp.features import FEATURES  # noqa: E402
 from carapp.features.base import AppContext  # noqa: E402
 from carapp.model.state import CarState  # noqa: E402
 from carapp.ui import theme  # noqa: E402
+from carapp.ui.focus import window_has_focus  # noqa: E402
 from carapp.ui.logpanel import LogPanel  # noqa: E402
 from carapp.ui.topbar import TopBar  # noqa: E402
 
@@ -389,8 +390,7 @@ class App:
         self._focus_timer = None
         if self._closing or not self._had_window_focus:
             return
-        focus = self.root.focus_get()
-        if focus is None or focus.winfo_toplevel() is not self.root:
+        if not window_has_focus(self.root):
             self._had_window_focus = False
             for feature in self.features:
                 if hasattr(feature, "stop_all"):
@@ -433,7 +433,7 @@ def main(argv=None):
     ap.add_argument("--host", help="临时指定小车地址，覆盖 config/settings.json")
     ap.add_argument("--transport", choices=("wired", "wifi", "sta"), help="连接方式：有线、AP 热点、STA 局域网")
     ap.add_argument("--car", help="车辆档案 ID，例如 HW-A0857935")
-    ap.add_argument("--tab", help="启动选项卡：gripper、remote、cruise 或 terminal")
+    ap.add_argument("--tab", help="启动选项卡：gripper、remote、cruise、mapping 或 terminal")
     args = ap.parse_args(argv)
 
     cfg = load_config()

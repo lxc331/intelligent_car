@@ -66,11 +66,16 @@ class ControlSafetyTests(unittest.TestCase):
         self.assertFalse(f._motion_thread.is_alive())
         self.assertFalse(any(msg.get('linear', {}).get('x', 0) for _, msg in self.sent[count:]))
 
-    def test_hold_timeout_stops_without_button_release(self):
+    def test_hold_ignores_legacy_timeout_and_stops_on_release(self):
         f = self.feature()
         f.base_cfg['jog_max_sec'] = .12
         f.jog(1, 0)
-        f._motion_thread.join(timeout=1)
+        try:
+            time.sleep(.25)
+            self.assertTrue(f._motion_thread.is_alive())
+            self.assertGreater(self.sent[-1][1]['linear']['x'], 0)
+        finally:
+            f.stop_wheels()
         self.assertFalse(f._motion_thread.is_alive())
         self.assertEqual(self.sent[-1][1]['linear']['x'], 0)
 
