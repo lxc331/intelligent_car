@@ -35,6 +35,29 @@ class MapModelTests(unittest.TestCase):
     def setUp(self):
         self.model = MapModel()
 
+    def test_confirmed_map_pose_works_without_tf_and_expires_or_resets(self):
+        self.model.accept_map(grid_message(),10.)
+        self.assertTrue(self.model.accept_map_pose((.03,.04,.5),11.))
+        snapshot=self.model.snapshot(11.2)
+        self.assertEqual(snapshot['pose'],(.03,.04,.5))
+        self.assertFalse(snapshot['pose_stale'])
+        self.assertEqual(snapshot['pose_error'],'')
+        self.assertTrue(self.model.snapshot(14.)['pose_stale'])
+        self.model.reset(keep_map=True)
+        self.assertIsNone(self.model.snapshot(14.)['pose'])
+
+    def test_map_pose_rejects_raw_odom_frame_invalid_values_and_old_epochs(self):
+        self.model.accept_map(grid_message(),10.)
+        for pose in ((float('nan'),0.,0.),(1.,2.),(True,0.,0.)):
+            self.assertFalse(self.model.accept_map_pose(pose,11.))
+        self.assertFalse(self.model.accept_map_pose((1.,2.,0.),11.,frame_id='odom'))
+        epoch=self.model.generation
+        self.model.reset(keep_map=True)
+        self.assertFalse(self.model.accept_map_pose((1.,2.,0.),11.,generation=epoch))
+        self.assertTrue(self.model.accept_map_pose((1.,2.,0.),12.))
+        self.assertFalse(self.model.accept_map_pose((9.,9.,0.),11.))
+        self.assertEqual(self.model.snapshot(12.)['pose'],(1.,2.,0.))
+
     def test_reset_localization_keeps_static_map_without_redecoding(self):
         self.model.accept_map(grid_message(), 10.)
         self.model.accept_odom(odometry(frame="map"), 10.)

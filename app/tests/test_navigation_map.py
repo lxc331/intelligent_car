@@ -2,9 +2,11 @@
 import math
 from pathlib import Path
 import tempfile
+import time
 import tkinter as tk
 import types
 import unittest
+from unittest.mock import patch
 
 from carapp.core.map_data import MapModel
 from carapp.core.navigation_map import load_navigation_map, valid_target
@@ -124,6 +126,41 @@ class NavigationMapUITests(unittest.TestCase):
         self.assertAlmostEqual(actual[0], point[0])
         self.assertAlmostEqual(actual[1], point[1])
         self.assertTrue(valid_target(grid, *point))
+
+    def test_current_car_has_coordinates_heading_and_can_be_centered(self):
+        self.model.accept_map_pose((2.1,3.15,.7),time.monotonic())
+        self.panel.set_localization(True)
+        self.panel._pan=(200.,-100.)
+        with patch.object(self.panel.canvas,'winfo_width',return_value=600), \
+                patch.object(self.panel.canvas,'winfo_height',return_value=400):
+            self.panel.on_tick()
+            self.assertTrue(self.panel.canvas.find_withtag('vehicle'))
+            text=self.panel.canvas.itemcget(self.panel.canvas.find_withtag('nav_vehicle_text')[0],'text')
+            self.assertIn('当前小车',text)
+            self.assertIn('x=2.10',text)
+            self.assertIn('y=3.15',text)
+            self.assertTrue(self.panel.center_vehicle())
+            point=self.panel._point(2.1,3.15,self.panel._geometry())
+            self.assertAlmostEqual(point[0],300.)
+            self.assertAlmostEqual(point[1],200.)
+
+    def test_initial_pose_is_never_presented_as_current_localization(self):
+        self.model.accept_map_pose((2.1,3.15,.7),time.monotonic())
+        self.panel.set_initial((2.1,3.15,.7))
+        self.panel.set_localization(False,'等待雷达确认')
+        self.panel.on_tick()
+        self.assertFalse(self.panel.canvas.find_withtag('vehicle'))
+        self.assertTrue(self.panel.canvas.find_withtag('nav_initial'))
+        self.assertIn('未定位',self.panel.pose_label.cget('text'))
+        self.assertEqual(self.panel.center_button.cget('state'),'disabled')
+
+    def test_expired_coordinates_are_labeled_as_last_position(self):
+        self.model.accept_map_pose((2.1,3.15,.7),time.monotonic()-3.)
+        self.panel.set_localization(True)
+        self.panel.on_tick()
+        self.assertIn('上次位置',self.panel.pose_label.cget('text'))
+        text=self.panel.canvas.itemcget(self.panel.canvas.find_withtag('nav_vehicle_text')[0],'text')
+        self.assertIn('已过期',text)
 
     def test_free_selection_drag_heading_and_occupied_rejection(self):
         self.panel._zoom = 100.

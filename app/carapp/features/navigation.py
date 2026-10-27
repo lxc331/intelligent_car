@@ -115,6 +115,7 @@ class NavigationFeature(Feature):
         split = ttk.Panedwindow(parent, orient="horizontal")
         split.pack(fill="both", expand=True, padx=6, pady=(0, 4))
         self.map_panel = NavigationMapPanel(split, self.model, on_pose=self.select_pose)
+        self.map_panel.set_localization(False, "请启动导航定位，并标定实际位置与朝向")
         self.cam = MappingCamera(split, self.ctx)
         split.add(self.map_panel, weight=1)
         split.add(self.cam, weight=1)
@@ -201,6 +202,8 @@ class NavigationFeature(Feature):
 
     def _reset_pose(self):
         self.model.reset(keep_map=True)
+        if hasattr(self, "map_panel"):
+            self.map_panel.set_localization(False, "请启动导航定位，并标定实际位置与朝向")
 
     def disconnect(self):
         self.stop_all()
@@ -396,6 +399,8 @@ class NavigationFeature(Feature):
             self._notice("%s 失败：%s" % (op, error), True)
             if op in ("start", "connect", "status"):
                 self.engaged = False
+                self.model.clear_map_pose()
+                self.map_panel.set_localization(False, "定位服务未启动或连接失效，请查看上方状态")
             return
         if self._record:
             paths = result.get("temporary_paths") or result.get("remote_files") or []
@@ -439,6 +444,8 @@ class NavigationFeature(Feature):
         if result.get("connected") is False:
             self.engaged = False
             self.stop_all()
+        if op in ("start", "status", "initial_pose", "stop"):
+            self._accept_navigation_pose(event)
         if "path" in result and op == "status" and (self.motion_active or self._planned_goal == self.goal):
             self.map_panel.set_plan(result["path"])
         phase = result.get("goal_state")
@@ -449,6 +456,27 @@ class NavigationFeature(Feature):
             if phase in labels:
                 self._notice(labels[phase], phase in ("aborted", "error"))
                 self._keyframe(phase)
+
+    def _accept_navigation_pose(self, event):
+        """Show the car-side map localization even if the UI missed a TF edge."""
+        result = event.get("result") or {}
+        now = time.monotonic()
+        try:
+            received_at = float(event.get("received_at", now))
+            age = float(result.get("pose_age", 0.))
+            valid_age = math.isfinite(age) and math.isfinite(received_at) and 0. <= age <= self.model.POSE_TIMEOUT
+            valid_age = valid_age and 0. <= now - received_at + age <= self.model.POSE_TIMEOUT
+            confirmed = self.engaged and result.get("localized") is True and valid_age
+            accepted = confirmed and self.model.accept_map_pose(result.get("pose"), received_at-age,
+                frame_id=result.get("pose_frame", "map"))
+        except (TypeError, ValueError, OverflowError):
+            accepted = False
+        if accepted:
+            self.map_panel.set_localization(True)
+        else:
+            self.model.clear_map_pose()
+            detail = "请启动导航定位，并标定实际位置与朝向" if not self.engaged else "等待雷达确认定位；标定点不是实时位置"
+            self.map_panel.set_localization(False, detail)
 
     def on_tick(self, st):
         if self.closed:

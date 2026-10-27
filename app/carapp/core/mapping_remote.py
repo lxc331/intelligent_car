@@ -151,8 +151,26 @@ class MappingRemote:
         output, error, count = bytearray(), bytearray(), 0
         deadline = time.monotonic() + timeout
         guard_at = time.monotonic() + 3
+        eof = set()
+        def receive(block, stderr=False):
+            nonlocal count
+            if stderr:
+                error.extend(block)
+                if len(error) > 12000:
+                    del error[:-12000]
+            else:
+                count += len(block)
+                if count > limit:
+                    raise MappingRemoteError('远端响应超过允许大小')
+                if sink is None:
+                    output.extend(block)
+                else:
+                    sink.write(block)
         try:
             channel.exec_command(command)
+            # Exit status and drained streams are different SSH events. A
+            # large Docker stdout can still have tail packets in transit.
+            channel.settimeout(0.)
             while True:
                 now = time.monotonic()
                 self._guard(check_network=now >= guard_at)
@@ -166,24 +184,32 @@ class MappingRemote:
                     block = channel.recv(65536)
                     if not block:
                         break
-                    count += len(block)
-                    if count > limit:
-                        raise MappingRemoteError('远端响应超过允许大小')
-                    if sink is None:
-                        output.extend(block)
-                    else:
-                        sink.write(block)
+                    receive(block)
                     progressed = True
                 while channel.recv_stderr_ready():
                     self._guard(check_network=False)
                     block = channel.recv_stderr(65536)
                     if not block:
                         break
-                    error.extend(block)
-                    if len(error) > 12000:
-                        del error[:-12000]
+                    receive(block, stderr=True)
                     progressed = True
-                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                finished = channel.exit_status_ready()
+                if finished:
+                    # recv_ready=False means no buffered bytes, not EOF. Read
+                    # nonblocking until both public recv APIs return b''.
+                    for stream, reader in (('stdout', channel.recv), ('stderr', channel.recv_stderr)):
+                        if stream in eof:
+                            continue
+                        try:
+                            block = reader(65536)
+                        except socket.timeout:
+                            continue
+                        if block:
+                            receive(block, stderr=stream == 'stderr')
+                            progressed = True
+                        else:
+                            eof.add(stream)
+                if finished and len(eof) == 2 and not channel.recv_ready() and not channel.recv_stderr_ready():
                     status = channel.recv_exit_status()
                     if status:
                         message = error.decode('utf-8', 'replace').strip() or '退出码 %d' % status

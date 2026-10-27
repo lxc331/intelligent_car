@@ -5,6 +5,7 @@ status independently of Tk and never starts or replays a motion command itself.
 """
 import queue
 import threading
+import time
 
 
 _TERMINAL_GOALS = frozenset(("succeeded", "canceled", "cancelled", "aborted",
@@ -179,7 +180,7 @@ class NavigationSession:
                 if not stale:
                     self._apply_result_locked(operation, result)
             self.events.put(dict(operation=operation, result=result, error=None, stale=stale,
-                                 target=self._target(operation, args)))
+                                 target=self._target(operation, args), received_at=time.monotonic()))
             if not stale and operation not in ("cancel", "stop") and result.get("connected") is False:
                 self.request_cancel()
         except Exception as exc:

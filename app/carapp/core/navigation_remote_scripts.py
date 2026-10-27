@@ -164,7 +164,11 @@ elif op in ('heartbeat','revoke'):
 elif op=='start': sourced(lambda:output(startup()))
 elif op=='status':
  if owned():
-  try: value=json.loads((root/'state.json').read_text())
+  try:
+   state=root/'state.json'; value=json.loads(state.read_text())
+   value['pose_age']=max(0.,time.time()-state.stat().st_mtime); value['pose_frame']='map'
+   if value['pose_age']>2.:
+    value.update(pose=None,localized=False,ready=False,detail='导航定位状态已过期，请检查车端服务')
   except (OSError,ValueError): value=dict(running=True,owned=True,ready=False,detail='导航服务启动中')
   value['connected']=True; output(value)
  else: output(dict(connected=True,running=False,owned=False,ready=False,goal_state='idle'))

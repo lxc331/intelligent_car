@@ -1,0 +1,10 @@
+# Sandbox: 2.97 m (x/right) x 5.40 m (y/up).
+# Original rawMap.png: 594 x 1080 pixels, 0.5 cm per pixel.
+# Origin is the lower-left outer edge; yaw is in radians.
+image: rawMap.pgm
+mode: trinary
+resolution: 0.005
+origin: [0.0, 0.0, 0.0]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196

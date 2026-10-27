@@ -99,6 +99,23 @@ class NavigationFeatureTests(unittest.TestCase):
         self.assertTrue(self.session.cancels)
         self.assertTrue(all(not msg["linear"]["x"] and not msg["angular"]["z"] for msg in self.commands))
 
+    def test_remote_confirmed_pose_is_visible_without_websocket_tf(self):
+        self.result('status',running=True,localized=True,pose=[.8,.9,1.2],pose_frame='map',pose_age=.1)
+        self.assertEqual(self.feature.model.snapshot()['pose'],(.8,.9,1.2))
+        self.feature.map_panel.on_tick()
+        self.assertTrue(self.feature.map_panel.canvas.find_withtag('vehicle'))
+        self.assertIn('x=0.80',self.feature.map_panel.pose_label.cget('text'))
+        self.assertIn('y=0.90',self.feature.map_panel.pose_label.cget('text'))
+
+    def test_unconfirmed_and_queued_old_pose_never_claim_current_location(self):
+        self.result('status',running=True,localized=False,pose=[.8,.9,1.2])
+        self.feature.map_panel.on_tick()
+        self.assertFalse(self.feature.map_panel.canvas.find_withtag('vehicle'))
+        self.assertIn('未定位',self.feature.map_panel.pose_label.cget('text'))
+        self.feature._handle_event(dict(operation='status',error=None,received_at=time.monotonic()-5.,
+            result=dict(running=True,localized=True,pose=[.8,.9,1.2],pose_age=0.)))
+        self.assertIsNone(self.feature.model.snapshot()['pose'])
+
     def test_failed_path_does_not_launch_movement(self):
         self.feature.navigate()
         self.result("plan", path=[], length=0.)

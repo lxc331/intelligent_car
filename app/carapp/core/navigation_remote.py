@@ -189,7 +189,10 @@ class NavigationRemote(MappingRemote):
                 return dict(connected=False,running=False,owned=False,ready=False,goal_state='canceled',
                             motion_stopped=False,motion_lease_seconds=2.,
                             detail='SSH 已断开；车端控制租约到期后停车')
+            began = time.monotonic()
             result = self._remote('status')
+            if 'pose' in result:
+                result['pose_age'] = float(result.get('pose_age', 0.)) + time.monotonic() - began
             if result.get('goal_state') in ('succeeded','canceled','aborted','error'):
                 with self._intent_lock:
                     self._motion_allowed = False

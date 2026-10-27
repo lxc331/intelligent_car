@@ -1,0 +1,34 @@
+{
+  "local_dir": "D:\\林兴城的文件\\读研\\智慧交通工程中心\\app\\savedMap\\sandbox_20261027_191443_20261027_194830_c90bf11b",
+  "remote_dir": "/home/ubuntu/ros2_ws/src/slam/maps/sandbox_20261027_191443_20261027_194830_c90bf11b",
+  "files": [
+    {
+      "name": "map.yaml",
+      "size": 121,
+      "sha256": "dc68cc752d03733b161d0986ebc3dc4b082f8d0ff328c9f2369986febb87e8ec"
+    },
+    {
+      "name": "map.pgm",
+      "size": 68988,
+      "sha256": "9f7a74ce3360c29a4fbe5d69094fa66ef838cf604e26cc80f59230158da0861d"
+    },
+    {
+      "name": "map.posegraph",
+      "size": 10414175,
+      "sha256": "bbafdd96aa1354c06b4983839253889807e423c45c5f4c78f1d870548890c405"
+    },
+    {
+      "name": "map.data",
+      "size": 958182,
+      "sha256": "319a851eca5a3ebd67fbf327098083657f98c2d89d2f1ed616f70ddd2922d1fd"
+    }
+  ],
+  "serialized": true,
+  "warnings": [],
+  "scope": "container",
+  "profile_id": "HW-A0857935",
+  "host": "192.168.167.136",
+  "recovered_from_existing_save": true,
+  "recovered_at": "2026-10-27T20:14:54.574575",
+  "vehicle_files_changed": []
+}

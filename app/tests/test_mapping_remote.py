@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -220,10 +221,54 @@ class MappingLifecycleTests(unittest.TestCase):
             return state['polls'] >= done_after
         channel = types.SimpleNamespace(exec_command=lambda value: None, recv_ready=lambda: False,
                                         recv_stderr_ready=lambda: False, exit_status_ready=ready,
+                                        settimeout=lambda value: None, recv=lambda size: b'',
+                                        recv_stderr=lambda size: b'',
                                         recv_exit_status=lambda: 0, close=lambda: state.update(closed=True))
         transport = types.SimpleNamespace(is_active=lambda: True, open_session=lambda **kwargs: channel)
         client = types.SimpleNamespace(get_transport=lambda: transport, close=lambda: None)
         return client, state
+
+    def test_exit_status_before_last_packets_does_not_truncate_binary_download(self):
+        remote = MappingRemote('invalid', 'test')
+        head, tail = b'header\x00\xff', b'last\x00\xffpacket' * 4000
+        state = dict(head=True, reads=0, closed=False)
+        def recv(size):
+            if state['head']:
+                state['head'] = False
+                return head
+            state['reads'] += 1
+            if state['reads'] == 1:
+                raise socket.timeout()
+            if state['reads'] == 2:
+                return tail
+            return b''
+        channel = types.SimpleNamespace(exec_command=lambda command: None, settimeout=lambda value: None,
+            recv_ready=lambda:state['head'], recv=recv, recv_stderr_ready=lambda:False,
+            recv_stderr=lambda size:b'', exit_status_ready=lambda:True, recv_exit_status=lambda:0,
+            close=lambda:state.update(closed=True))
+        remote.client = types.SimpleNamespace(get_transport=lambda:types.SimpleNamespace(
+            is_active=lambda:True, open_session=lambda **kwargs:channel))
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder)/'map.posegraph'
+            expected = head + tail
+            descriptor = dict(name=target.name,size=len(expected),sha256=hashlib.sha256(expected).hexdigest())
+            remote._download('/tmp/map.posegraph','container',target,descriptor)
+            self.assertEqual(target.read_bytes(),expected)
+        self.assertTrue(state['closed'])
+
+    def test_stderr_tail_is_drained_after_exit_status(self):
+        remote = MappingRemote('invalid','test')
+        reads = []
+        def stderr(size):
+            reads.append(True)
+            return b'late error details' if len(reads)==1 else b''
+        channel=types.SimpleNamespace(exec_command=lambda value:None,settimeout=lambda value:None,
+            recv_ready=lambda:False,recv=lambda size:b'',recv_stderr_ready=lambda:False,
+            recv_stderr=stderr,exit_status_ready=lambda:True,recv_exit_status=lambda:1,close=lambda:None)
+        remote.client=types.SimpleNamespace(get_transport=lambda:types.SimpleNamespace(
+            is_active=lambda:True,open_session=lambda **kwargs:channel))
+        with self.assertRaisesRegex(MappingRemoteError,'late error details'):
+            remote._execute('read-only')
 
     def test_network_guard_is_forced_initially_then_throttled_to_three_seconds(self):
         calls = []

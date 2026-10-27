@@ -107,6 +107,7 @@ class MapModel:
             self._odom_error = ""
             self._transforms = {}
             self._odom = None
+            self._map_pose = None
             self._trajectory = deque(maxlen=2000)
             self._trajectory_frame = None
 
@@ -159,6 +160,7 @@ class MapModel:
             self._grid = grid
             self._map_error = ""
             if self._trajectory_frame != frame_id:
+                self._map_pose = None
                 self._trajectory.clear()
                 self._trajectory_frame = frame_id
         return True
@@ -220,6 +222,31 @@ class MapModel:
             self._odom_error = ""
         return True
 
+    def accept_map_pose(self, pose, received_at, *, frame_id="map", generation=None):
+        """Accept a confirmed localization in map coordinates, never raw odometry."""
+        if not isinstance(pose, (list, tuple)) or len(pose) != 3:
+            return False
+        try:
+            values = tuple(_number(value) for value in pose)
+            received_at, frame_id = _number(received_at), _frame(frame_id)
+            if len(values) != 3 or any(abs(value) > 1e6 for value in values[:2]):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+        with self.lock:
+            if generation is not None and generation != self._generation:
+                return False
+            if not self._grid or self._grid["frame_id"] != frame_id:
+                return False
+            if self._map_pose and received_at < self._map_pose[1]:
+                return False
+            self._map_pose = values, received_at
+        return True
+
+    def clear_map_pose(self):
+        with self.lock:
+            self._map_pose = None
+
     def _lookup(self, parent, child):
         if parent == child:
             return (0., 0., 0.), None
@@ -250,6 +277,7 @@ class MapModel:
             pose = None
             pose_stamp = None
             pose_error = "等待里程计和地图定位"
+            direct_pose = False
             if grid and self._odom:
                 odom = self._odom
                 transform = self._lookup(grid["frame_id"], odom["frame_id"])
@@ -268,6 +296,10 @@ class MapModel:
                         pose, pose_stamp = transform
                         pose_error = ""
                         break
+            if grid and self._map_pose and (pose_stamp is None or self._map_pose[1] >= pose_stamp):
+                pose, pose_stamp = self._map_pose
+                direct_pose = True
+                pose_error = ""
             pose_age = max(0., now - pose_stamp) if pose_stamp is not None else None
             stale = pose is not None and pose_age is not None and pose_age > self.POSE_TIMEOUT
             if stale:
@@ -277,7 +309,7 @@ class MapModel:
                 if not self._trajectory or math.dist(point, self._trajectory[-1]) >= .02:
                     self._trajectory.append(point)
             return dict(grid=grid, pose=pose, error=self._map_error,
-                        pose_error=self._odom_error or self._tf_error or pose_error,
+                        pose_error=pose_error if direct_pose else self._odom_error or self._tf_error or pose_error,
                         map_age=max(0., now - grid["received_at"]) if grid else None,
                         pose_age=pose_age, pose_stale=stale,
                         trajectory=tuple(self._trajectory))

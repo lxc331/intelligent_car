@@ -1,5 +1,6 @@
 """Navigation map selection and overlays built on the shared occupancy viewer."""
 import math
+import tkinter as tk
 
 from carapp.core.navigation_map import valid_target
 from carapp.ui import theme
@@ -20,7 +21,17 @@ class NavigationMapPanel(MapPanel):
         self.plan = ()
         self._selection = None
         self._selection_error = ""
+        self._localized = None
+        self._localization_detail = ""
         super().__init__(parent, model)
+        pose_bar = tk.Frame(self, bg=theme.PANEL)
+        pose_bar.pack(fill="x", before=self.canvas)
+        self.pose_label = tk.Label(pose_bar, text="当前位置：未定位", anchor="w", justify="left",
+                                   bg=theme.PANEL, fg=theme.WARN, font=theme.FONT_BOLD)
+        self.pose_label.pack(side="left", fill="x", expand=True, padx=6, pady=4)
+        self.center_button = tk.Button(pose_bar, text="定位小车", command=self.center_vehicle,
+            bg=theme.PANEL_2, fg=theme.ACCENT, relief="flat", font=theme.FONT_SMALL)
+        self.center_button.pack(side="right", padx=4)
         self.canvas.bind("<ButtonPress-1>", self._select_start)
         self.canvas.bind("<B1-Motion>", self._select_move)
         self.canvas.bind("<ButtonRelease-1>", self._select_finish)
@@ -49,7 +60,25 @@ class NavigationMapPanel(MapPanel):
         self._selection_error = ""
         self.goal = self.initial = None
         self.plan = ()
+        self.set_localization(False, "请启动导航定位，并标定实际位置与朝向")
         self.reset_view()
+
+    def set_localization(self, localized, detail=""):
+        """Data only: an initial-pose click is not a localization confirmation."""
+        self._localized = bool(localized)
+        self._localization_detail = str(detail)
+
+    def center_vehicle(self):
+        snapshot = self.model.snapshot()
+        pose = snapshot.get("pose")
+        if self._localized is False or not pose or not snapshot.get("grid"):
+            return False
+        self._grid = snapshot["grid"]
+        x, y = self._point(pose[0], pose[1], self._geometry())
+        self._pan = (self._pan[0] + self.canvas.winfo_width() / 2 - x,
+                     self._pan[1] + self.canvas.winfo_height() / 2 - y)
+        self._render_key = None
+        return True
 
     @staticmethod
     def _pose(value):
@@ -134,7 +163,10 @@ class NavigationMapPanel(MapPanel):
         self.canvas.create_text(x + 8, y - 12, text=label, anchor="w", fill=color, tags=tag)
 
     def _draw(self, snapshot):
-        super()._draw(snapshot)
+        visible = snapshot
+        if self._localized is False:
+            visible = dict(snapshot, pose=None, trajectory=())
+        super()._draw(visible)
         self.canvas.delete("nav_path", "nav_goal", "nav_initial", "nav_select")
         if not self._grid:
             return
@@ -146,6 +178,30 @@ class NavigationMapPanel(MapPanel):
                 self.canvas.tag_lower("nav_path", "vehicle")
         self._marker(self.goal, "#ed6670", "目标", "nav_goal", geometry)
         self._marker(self.initial, "#a98bff", "初始位姿", "nav_initial", geometry)
+        pose = visible.get("pose")
+        if pose is not None:
+            self.canvas.delete("vehicle")
+            x, y = self._point(pose[0], pose[1], geometry)
+            color = theme.WARN if snapshot.get("pose_stale") else "#00cfe9"
+            angle = pose[2] - self._grid["origin"][2]
+            self.canvas.create_oval(x-13, y-13, x+13, y+13, outline=color, width=3, tags="vehicle")
+            self.canvas.create_oval(x-6, y-6, x+6, y+6, fill=color, outline="#ffffff", tags="vehicle")
+            self.canvas.create_line(x, y, x+29*math.cos(angle), y-29*math.sin(angle),
+                                    arrow="last", fill=color, width=4, tags="vehicle")
+            label = "上次位置（已过期）" if snapshot.get("pose_stale") else "当前小车"
+            text = self.canvas.create_text(x+19, y-17, anchor="sw", fill="#ffffff", font=theme.FONT_SMALL,
+                text="%s\nx=%.2f  y=%.2f m  %.0f°" % (label, pose[0], pose[1], math.degrees(pose[2])),
+                tags=("vehicle", "nav_vehicle_text"))
+            bounds = self.canvas.bbox(text)
+            if bounds:
+                # Keep the coordinate callout inside the viewport at map edges.
+                dx = max(0, 4-bounds[0]) - max(0, bounds[2]-self.canvas.winfo_width()+4)
+                dy = max(0, 4-bounds[1]) - max(0, bounds[3]-self.canvas.winfo_height()+4)
+                self.canvas.move(text, dx, dy)
+                left, top, right, bottom = self.canvas.bbox(text)
+                background = self.canvas.create_rectangle(left-3, top-2, right+3, bottom+2,
+                    fill="#172128", outline=color, tags="vehicle")
+                self.canvas.tag_lower(background, text)
         if self._selection and self._selection[0] == self._grid["revision"]:
             _, x, y, end_x, end_y = self._selection
             self.canvas.create_line(x, y, end_x, end_y, fill=theme.ACCENT, width=2,
@@ -153,5 +209,19 @@ class NavigationMapPanel(MapPanel):
 
     def on_tick(self, state=None):
         super().on_tick(state)
+        snapshot = self._last_state
+        pose = snapshot.get("pose") if self._localized is not False else None
+        self.center_button.config(state="normal" if pose is not None else "disabled")
+        if pose is not None:
+            prefix = "上次位置（定位过期）" if snapshot.get("pose_stale") else "当前位置"
+            self.pose_label.config(text="%s：x=%.2f m  y=%.2f m  朝向=%.0f°" %
+                (prefix, pose[0], pose[1], math.degrees(pose[2])),
+                fg=theme.WARN if snapshot.get("pose_stale") else theme.ACCENT)
+        else:
+            detail = self._localization_detail or "请启动导航定位，并标定实际位置与朝向"
+            self.pose_label.config(text="当前位置：未定位；"+detail, fg=theme.WARN,
+                                   wraplength=max(200, self.canvas.winfo_width()-100))
+            if self._localized is False:
+                self.info.config(text="尚无已确认的地图坐标；紫色初始位姿是手动标定点。", fg=theme.WARN)
         if self._selection_error:
             self.info.configure(text=self._selection_error, fg=theme.WARN)
