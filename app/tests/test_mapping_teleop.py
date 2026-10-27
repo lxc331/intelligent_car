@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from carapp.config import DEFAULTS
+from carapp.core.key_state import key_is_down
 from carapp.core.teleop import TeleopController
 from carapp.ui.teleoppanel import TeleopPanel, _MotionGate
 
@@ -161,10 +162,10 @@ class MappingTeleopUITests(unittest.TestCase):
         self.assertTrue(self.panel.motion_active)
         self.assertTrue(self.panel.key_surface.bind("<FocusOut>"))
         self.panel.focus_lost()
-        self.assertFalse(self.panel.motion_active)
-        self.assertFalse(self.panel._armed)
+        self.assertTrue(self.panel.motion_active)
+        self.assertTrue(self.panel._armed)
 
-    def test_mapped_focusout_event_disarms_keyboard(self):
+    def test_mapped_focusout_keeps_hold_then_background_release_stops(self):
         self.root.deiconify()
         self.arm()
         other = tk.Entry(self.root)
@@ -178,8 +179,47 @@ class MappingTeleopUITests(unittest.TestCase):
         self.assertTrue(self.panel.motion_active)
         other.focus_force()
         self.root.update()
+        self.assertTrue(self.panel.motion_active)
+        self.assertTrue(self.panel._armed)
+        with patch("carapp.ui.teleoppanel.key_is_down", return_value=True):
+            self.panel.on_background_tick(self.ctx.state)
+        self.assertTrue(self.panel.motion_active)
+        # No Tk KeyRelease is delivered to the original control after focus moves.
+        with patch("carapp.ui.teleoppanel.key_is_down", return_value=False):
+            self.panel.on_background_tick(self.ctx.state)
+        self.assertFalse(self.panel.motion_active)
+        self.assertTrue(self.panel._armed)
+        self.assertFalse(self.panel._unfocused_keys)
+        self.assertEqual(self.ctx.sent[-1], (0., 0., 0.))
+
+    def test_unfocused_multiple_keys_release_independently_without_new_input(self):
+        self.arm()
+        with patch.object(self.root, "focus_get", return_value=self.panel.key_surface):
+            for key in "wq":
+                self.panel.key_press(self.key(key))
+        self.panel.focus_lost()
+        with patch("carapp.ui.teleoppanel.key_is_down", side_effect=lambda key: key == "q"):
+            self.panel.on_background_tick(self.ctx.state)
+        self.assertEqual(self.panel.controller.pressed, {"q"})
+        with patch.object(self.root, "focus_get", return_value=self.panel):
+            self.panel.key_press(self.key("s"))
+        self.assertEqual(self.panel.controller.pressed, {"q"})
+        self.panel.set_active(False)
         self.assertFalse(self.panel.motion_active)
         self.assertFalse(self.panel._armed)
+        self.assertFalse(self.panel._unfocused_keys)
+
+    def test_disconnect_still_stops_while_unfocused_key_is_held(self):
+        self.arm()
+        with patch.object(self.root, "focus_get", return_value=self.panel.key_surface):
+            self.panel.key_press(self.key("w"))
+        self.panel.focus_lost()
+        self.ctx.state["ws_connected"] = False
+        with patch("carapp.ui.teleoppanel.key_is_down", return_value=True):
+            self.panel.on_background_tick(self.ctx.state)
+        self.assertFalse(self.panel.motion_active)
+        self.assertFalse(self.panel._armed)
+        self.assertFalse(self.panel._unfocused_keys)
 
     def test_queued_old_focusout_does_not_cancel_reenabled_keyboard(self):
         self.root.deiconify()
@@ -297,6 +337,19 @@ class MappingTeleopUITests(unittest.TestCase):
         self.assertTrue(self.panel.motion_active)
         self.assertEqual(self.panel.controller.pressed, original)
         self.assertNotIn("w", self.panel._releases)
+
+
+class PhysicalKeyStateTests(unittest.TestCase):
+    def test_windows_reads_high_bit_and_normalizes_key(self):
+        user32 = types.SimpleNamespace(GetAsyncKeyState=lambda code: 0x8001 if code == ord("W") else 1)
+        with patch("carapp.core.key_state.sys.platform", "win32"), \
+                patch("carapp.core.key_state.ctypes.windll", types.SimpleNamespace(user32=user32), create=True):
+            self.assertTrue(key_is_down("w"))
+            self.assertFalse(key_is_down("q"))
+
+    def test_other_platform_reports_unavailable(self):
+        with patch("carapp.core.key_state.sys.platform", "linux"):
+            self.assertIsNone(key_is_down("w"))
 
 
 if __name__ == "__main__":

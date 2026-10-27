@@ -8,6 +8,7 @@ import threading
 import tkinter as tk
 
 from carapp.core.teleop import BASE_KEYS, TeleopController
+from carapp.core.key_state import key_is_down
 from carapp.ui import theme
 from carapp.ui.focus import widget_has_focus
 
@@ -56,6 +57,7 @@ class TeleopPanel(tk.Frame):
         self._closed = False
         self._mouse_key = None
         self._releases = {}
+        self._unfocused_keys = set()
         self._gate = _MotionGate(ctx)
         self.controller = TeleopController(self._gate)
         self.mode = tk.StringVar(value="mouse")
@@ -162,8 +164,10 @@ class TeleopPanel(tk.Frame):
     def focus_lost(self, _event=None):
         if _event is not None and widget_has_focus(self.key_surface):
             return
-        if self._armed or self.motion_active:
-            self.stop()
+        # Keep an existing hold alive; Tk may no longer receive its KeyRelease.
+        # Poll only keys already accepted here, never start motion from global input.
+        with self.controller.lock:
+            self._unfocused_keys.update(self.controller.pressed.intersection(BASE_KEYS))
 
     def set_active(self, active):
         self._active = bool(active)
@@ -216,6 +220,7 @@ class TeleopPanel(tk.Frame):
 
     def _release_key(self, key):
         self._releases.pop(key, None)
+        self._unfocused_keys.discard(key)
         self.controller.release(key)
 
     def mouse_press(self, key):
@@ -248,6 +253,7 @@ class TeleopPanel(tk.Frame):
             except tk.TclError:
                 pass
         self._releases.clear()
+        self._unfocused_keys.clear()
         # Keep keyboard directions blocked until a real release. A stopped held
         # key must not resume on OS repeat after focus returns or re-arming.
         with self.controller.lock:
@@ -257,6 +263,12 @@ class TeleopPanel(tk.Frame):
         self._mouse_key = None
 
     def on_background_tick(self, state):
+        for key in tuple(self._unfocused_keys):
+            if key_is_down(key) is False:
+                pending = self._releases.pop(key, None)
+                if pending:
+                    self.ctx.root.after_cancel(pending)
+                self._release_key(key)
         if not self._refresh_permission():
             if self.motion_active or self._armed:
                 self.stop()
@@ -265,7 +277,7 @@ class TeleopPanel(tk.Frame):
         with self.controller.lock:
             keys = " / ".join(sorted(self.controller.pressed)).upper()
         if self.mode.get() == "keyboard":
-            text = ("键盘已启用：%s" % (keys or "等待按键，空格/Esc 停止")) if self._armed else "键盘未启用；点击启用后操作，离开焦点即停。"
+            text = ("键盘已启用：%s" % (keys or "等待按键，空格/Esc 停止")) if self._armed else "键盘未启用；点击启用后操作，失焦不停车，松键即停。"
         else:
             text = "鼠标：按住持续移动，松开或移出即停；无行驶时长限制。"
         self.status.config(text=text, fg=theme.OK if keys else theme.TEXT_DIM)

@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock
 
 from carapp.main import App
+from carapp.features.mapping import MappingFeature
 from carapp.ui.focus import window_has_focus
 
 
@@ -70,6 +71,15 @@ class WindowFocusTests(unittest.TestCase):
         app._check_window_focus()
         self.stop.assert_called_once_with()
         self.assertFalse(app._had_window_focus)
+
+    def test_mapping_is_exempt_but_other_manual_controls_still_stop(self):
+        app = self.app('')
+        mapping = MappingFeature.__new__(MappingFeature)
+        mapping.teleop = types.SimpleNamespace(motion_active=True, stop=Mock())
+        app.features.append(mapping)
+        app._check_window_focus()
+        mapping.teleop.stop.assert_not_called()
+        self.stop.assert_called_once_with()
 
     def test_separate_toplevel_still_stops(self):
         dialog = tk.Toplevel(self.root)

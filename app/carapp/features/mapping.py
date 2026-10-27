@@ -24,6 +24,7 @@ from carapp.ui.teleoppanel import TeleopPanel
 class MappingFeature(Feature):
     key = "mapping"
     title = "沙盘建模 + 实时展示"
+    stop_on_focus_loss = False
     SCOPES = {"ClawPi 容器": "container", "小车宿主机": "host"}
 
     def __init__(self, ctx):
