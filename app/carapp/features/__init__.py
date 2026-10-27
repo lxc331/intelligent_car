@@ -12,6 +12,7 @@ from carapp.features.gripper import GripperFeature
 from carapp.features.remote import RemoteFeature
 from carapp.features.cruise import CruiseFeature
 from carapp.features.mapping import MappingFeature
+from carapp.features.navigation import NavigationFeature
 from carapp.features.terminal import TerminalFeature
 
 FEATURES = [
@@ -19,7 +20,8 @@ FEATURES = [
     RemoteFeature,
     CruiseFeature,
     MappingFeature,
+    NavigationFeature,
     TerminalFeature,
 ]
 
-__all__ = ["FEATURES", "GripperFeature", "RemoteFeature", "CruiseFeature", "MappingFeature", "TerminalFeature"]
+__all__ = ["FEATURES", "GripperFeature", "RemoteFeature", "CruiseFeature", "MappingFeature", "NavigationFeature", "TerminalFeature"]

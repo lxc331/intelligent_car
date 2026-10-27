@@ -120,6 +120,7 @@ class TopBar(tk.Frame):
         self.lbl_grip = _chip(right, "夹爪目标")
         self.lbl_base = _chip(right, "底盘")
         self.lbl_cruise = _chip(right, "自动巡航")
+        self.lbl_navigation = _chip(right, "沙盘导航")
         self.sync_selection()
 
     # ---------- 交互 ----------
@@ -262,6 +263,9 @@ class TopBar(tk.Frame):
 
     # ---------- 刷新 ----------
     def update_state(self, st):
+        navigation = st.get("navigation_running", False)
+        self.lbl_navigation.config(text="前往目标中" if navigation else "未行驶",
+                                   fg=theme.OK if navigation else theme.TEXT_DIM)
         running, waiting = st.get("cruise_running"), st.get("cruise_waiting")
         self.lbl_cruise.config(text="等待雷达，自动恢复" if running and waiting else "运行中（支持后台）" if running else "已停止",
                                fg=theme.WARN if running and waiting else theme.OK if running else theme.TEXT_DIM)

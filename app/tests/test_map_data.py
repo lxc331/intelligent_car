@@ -35,6 +35,21 @@ class MapModelTests(unittest.TestCase):
     def setUp(self):
         self.model = MapModel()
 
+    def test_reset_localization_keeps_static_map_without_redecoding(self):
+        self.model.accept_map(grid_message(), 10.)
+        self.model.accept_odom(odometry(frame="map"), 10.)
+        before = self.model.snapshot(10.)
+        generation = self.model.generation
+        self.assertIsNotNone(before["pose"])
+        self.model.reset(keep_map=True)
+        after = self.model.snapshot(10.)
+        self.assertIs(before["grid"]["data"], after["grid"]["data"])
+        self.assertIs(before["grid"]["pixels"], after["grid"]["pixels"])
+        self.assertIsNone(after["pose"])
+        self.assertFalse(after["trajectory"])
+        self.assertGreater(self.model.generation, generation)
+        self.assertFalse(self.model.accept_map(grid_message(), 10., generation=generation))
+
     def test_grid_snapshot_immutable_payload_is_shared_not_copied(self):
         message = grid_message()
         self.assertTrue(self.model.accept_map(message, 10.))

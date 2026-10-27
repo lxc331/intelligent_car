@@ -95,11 +95,13 @@ class MapModel:
         with self.lock:
             return self._generation
 
-    def reset(self):
+    def reset(self, *, keep_map=False):
+        """Clear session localization; an imported static map may be retained."""
         with self.lock:
             self._generation += 1
             self._revision += 1
-            self._grid = None
+            if not keep_map:
+                self._grid = None
             self._map_error = ""
             self._tf_error = ""
             self._odom_error = ""

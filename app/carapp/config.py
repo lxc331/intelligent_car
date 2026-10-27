@@ -100,6 +100,7 @@ DEFAULTS = {
     "terminal": {"port": 22, "username": "pi", "auto_connect": True},
     "mapping": {"remote_dir": "/home/ubuntu/ros2_ws/src/slam/maps",
                 "scope": "container", "serialize": True},
+    "navigation": {"speed": .06},
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
 

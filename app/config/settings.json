@@ -160,7 +160,7 @@
     }
   },
   "cruise": {
-    "detection_distance": 0.4,
+    "detection_distance": 0.5,
     "speed": 0.15,
     "mode": "avoid",
     "scan_angle": 90.0,
