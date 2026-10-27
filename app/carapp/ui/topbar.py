@@ -97,6 +97,12 @@ class TopBar(tk.Frame):
                                      activebackground=theme.BORDER, font=theme.FONT_SMALL, padx=10)
         self.btn_diagnose.pack(side="left", padx=2)
 
+        self._wifi_dialog = None
+        self.btn_wifi_setup = tk.Button(row, text="配置小车 Wi-Fi", command=self._configure_wifi,
+                                       bg=theme.PANEL_2, fg=theme.ACCENT, relief="flat",
+                                       activebackground=theme.BORDER, font=theme.FONT_SMALL, padx=10)
+        self.btn_wifi_setup.pack(side="left", padx=2)
+
         right = tk.Frame(self, bg=theme.PANEL)
         right.pack(fill="x", padx=10, pady=(3, 7))
 
@@ -131,7 +137,7 @@ class TopBar(tk.Frame):
         self.sta_options.pack_forget()
         if mode == "sta":
             self.sta_options.pack(side="left", before=self.btn_apply)
-            text = "STA 局域网：电脑和小车接入同一网络，填写小车无线 IP；Wi-Fi 名称可选，仅用于提示"
+            text = "STA 局域网：填写小车无线 IP，Wi-Fi 名称仅作提示；更换或保存开机 Wi-Fi 请点「配置小车 Wi-Fi」"
         elif mode == "wifi":
             text = "AP 热点：先在系统连接所选车辆的 HW-* 热点，再连接 192.168.149.1"
         else:
@@ -221,6 +227,20 @@ class TopBar(tk.Frame):
     def _diagnose(self):
         self.btn_diagnose.config(state="disabled", text="诊断中…")
         self.app.diagnose_connection(self._diagnose_done)
+
+    def _configure_wifi(self):
+        if self._wifi_dialog is not None and self._wifi_dialog.winfo_exists():
+            self._wifi_dialog.lift()
+            return
+        if self.app.ctx.motion_in_use():
+            self.app.log("请先停止运动和动作序列，再配置小车 Wi-Fi")
+            return
+        from carapp.core.connection_profiles import get_profile
+        if get_profile(self.app.cfg) is None:
+            self.app.log("请先选择具体车辆，再配置 Wi-Fi")
+            return
+        from carapp.features.wifi_setup import WifiSetupDialog
+        self._wifi_dialog = WifiSetupDialog(self,self.app,self.var_sta_ssid.get())
 
     def _diagnose_done(self, report):
         self.btn_diagnose.config(state="normal", text="连接诊断")

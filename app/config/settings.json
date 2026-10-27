@@ -1,6 +1,6 @@
 {
   "car": {
-    "host": "192.168.150.3",
+    "host": "10.42.0.135",
     "http_port": 8080,
     "ws_port": 9090,
     "subnet_prefix": "192.168.150",
@@ -9,8 +9,8 @@
       "192.168.149"
     ],
     "profile_id": "HW-10CCA58E",
-    "transport": "wired",
-    "sta_ssid": ""
+    "transport": "sta",
+    "sta_ssid": "xiaomi"
   },
   "cars": [
     {
@@ -19,8 +19,8 @@
       "id": "HW-10CCA58E",
       "wifi_host": "192.168.149.1",
       "ssid": "HW-10CCA58E",
-      "sta_host": "192.168.137.149",
-      "sta_ssid": "Win11_Meng_plus"
+      "sta_host": "10.42.0.135",
+      "sta_ssid": "xiaomi"
     },
     {
       "name": "2 号车",
@@ -170,6 +170,11 @@
     "port": 22,
     "username": "pi",
     "auto_connect": true
+  },
+  "mapping": {
+    "remote_dir": "/home/ubuntu/ros2_ws/src/slam/maps",
+    "scope": "container",
+    "serialize": true
   },
   "status": {
     "poll_interval": 1.0,

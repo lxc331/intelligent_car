@@ -160,6 +160,15 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.saved["WIFI_MODE"], 2)
         self.assertFalse(any("do-not-log-secret" in line for line in self.logs))
 
+    def test_open_network_removes_old_security_and_uses_no_secret_file(self):
+        self.saved['WIFI_STA_PASSWORD']=''
+        self.assertTrue(self.adapter.try_sta(self.adapter.read_preference(),25))
+        settings=self.network.profiles[self.adapter.CLIENT]['settings']
+        self.assertEqual(settings['remove'],'wifi-sec')
+        self.assertNotIn('wifi-sec.key-mgmt',settings)
+        self.assertNotIn('wifi-sec.psk',settings)
+        self.assertEqual(self.network.secret_files,[])
+
     def test_mode_changed_while_waiting_for_lock_prevents_disconnect(self):
         cfg = self.adapter.read_preference()
         self.on_lock = lambda: self.saved.update(WIFI_MODE=1)

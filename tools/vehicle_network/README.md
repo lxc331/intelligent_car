@@ -24,9 +24,13 @@
 
 单张无线网卡在角色切换时会暂时中断 AP 连接。模式、目标网络或密码变更会在当前有限操作结束后重新读取，正常监控每 2 秒检查配置。`WIFI_STA_STARTUP_TIMEOUT` 和 `WIFI_STA_RETRY_INTERVAL` 可在主配置中覆盖默认等待时间。
 
+App 的“配置小车 Wi-Fi → 下发并连接”会将新网络原子保存到车端 `/home/pi/hiwonder-toolbox/wifi_conf.py` 的 `WIFI_MODE=2`、`WIFI_STA_SSID`、`WIFI_STA_PASSWORD`，随后读回校验，并确认 `wifi.service` 已开机启用且正在运行。服务未启用时执行 `systemctl enable wifi.service`，未运行时启动；已有活动服务使用幂等 `start`，开放网络兼容流程仍按需重启该服务。操作前备份服务单元和启用/运行状态；启用时可能新增 `/etc/systemd/system/multi-user.target.wants/wifi.service` 链接，App 在操作记录中列出。下次服务启动会重新读取首选网络；失败临时 AP 不改写这些值。该路径已通过离线启动初始化及回退后重新初始化测试，不能替代整车断电冷启动实测。
+
 STA 成功要求活动配置为客户端、SSID 匹配并获得有效 IPv4，不要求访问互联网。IP 变化后重新绑定厂家状态端口 9028。网络恢复与 LED 是否启用无关。
 
 客户端密钥由 NetworkManager 保存；启动连接时还使用权限为 0600 的 `/run/hiwonder-wifi-*` 临时认证文件，完成/失败后删除，不需要交互输入。认证文件格式依据 [NetworkManager nmcli 手册](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nmcli.html)。密码不写入恢复日志。
+
+开放网络需要移除整个 `wifi-sec` 设置，不能只把 `key-mgmt` 和密码置空。带 `OPEN_NETWORK_SUPPORTED = True` 的适配器已支持有密码与开放网络之间切换；相关命令已通过 NetworkManager 1.42.4 的 `--offline` 模式验证，不更改活动连接。App 的“配置小车 Wi-Fi”会在下发开放网络前备份并升级已识别的旧适配器，然后仅重启 `wifi.service` 使新模块生效；普通密码网络无需升级。对未识别的自定义适配器不会自动覆盖。
 
 ## 部署与回滚
 

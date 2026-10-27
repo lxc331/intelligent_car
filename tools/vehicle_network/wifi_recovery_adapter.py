@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import time
 
+OPEN_NETWORK_SUPPORTED = True
+
 try:
     from .wifi_recovery import RecoveryCoordinator
 except ImportError:
@@ -111,9 +113,13 @@ class WifiRecoveryAdapter:
             "ipv4.gateway", "" if mode == 2 else cfg["gateway"],
             "ipv4.never-default", "no" if mode == 2 else "yes",
             "ipv6.method", "auto" if mode == 2 else "disabled",
-            "wifi-sec.key-mgmt", "wpa-psk" if password else "",
-            "wifi-sec.psk", password, "wifi-sec.psk-flags", "0",
         ]
+        if password:
+            settings += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password, "wifi-sec.psk-flags", "0"]
+        else:
+            # Empty key-mgmt leaves an invalid security section in NM 1.42.
+            # Remove that entire setting when moving to an open network.
+            settings = ["remove", "wifi-sec", *settings]
         if mode == 1:
             settings += ["wifi.band", cfg["band"], "wifi.channel", str(cfg["channel"])]
         self._nm(["connection", "modify", "uuid", uuid, *settings], deadline)
