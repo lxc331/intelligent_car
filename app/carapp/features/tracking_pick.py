@@ -85,6 +85,9 @@ class TrackingPickControls:
             raise ValueError("请先把实时画面切换到 /image_raw 原始图像")
 
     def prepare(self):
+        if self.ctx.motion_in_use(exclude=self.owner):
+            self.ctx.log("其他功能正在占用底盘，请先点击顶部「停止全部」")
+            return
         if self.owner._busy:
             self.ctx.log("请先中止当前动作")
             return
@@ -139,6 +142,9 @@ class TrackingPickControls:
                 f.write(self.tracker.last_payload)
 
     def start(self):
+        if self.ctx.motion_in_use(exclude=self.owner):
+            self.ctx.log("其他功能正在占用底盘，请先点击顶部「停止全部」")
+            return
         if self.owner._busy:
             self.ctx.log("已有动作执行中")
             return
@@ -198,12 +204,20 @@ class TrackingPickControls:
         if self.runner:
             self.runner.cancel()
 
-    def tick(self, state):
+    def background_tick(self, state):
+        """Refresh shared overlays even while the controls' page is hidden."""
         obs = self.tracker.snapshot()
         target = obs.get("target") if time.monotonic()-obs["seen_at"] <= self.cfg["frame_timeout"] else None
         cal = self.calibration()
         state.update(tracking_target=target, tracking_calibration=cal)
-        self.ctx.state.update(tracking_target=target)
+        self.ctx.state.update(tracking_target=target, tracking_calibration=cal)
+
+    def tick(self, state, *, refresh=True):
+        # The standalone entry retains its old state-refresh behavior. Gripper
+        # already runs the background hook once per cycle and only draws here.
+        if refresh:
+            self.background_tick(state)
+        target, cal = state.get("tracking_target"), state.get("tracking_calibration")
         suffix = ("目标 x=%.2f y=%.2f" % (target["x"],target["y"])) if target else "未发现稳定目标"
         try:
             validate_calibration(cal,self.ctx.cfg["car"]["host"],self.cfg["color"],self.pose())

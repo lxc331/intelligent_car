@@ -295,6 +295,63 @@ class RemoteWidgetTests(unittest.TestCase):
         self.assertFalse(self.feature._armed)
         self.assertEqual(self.app.state.get('base_vy'), 0.)
 
+    def test_queued_focusout_after_reenable_does_not_disarm_current_surface(self):
+        # Use actual Tk focus events; calling handlers directly hid this race.
+        self.root.deiconify()
+        other = tk.Entry(self.root)
+        other.pack()
+        self.arm()
+        self.root.update()
+        self.feature.key_surface.focus_force()
+        self.root.update()
+        self.feature.enable_keyboard()
+        self.root.update()
+        other.focus_set()
+        self.feature.enable_keyboard()  # FocusOut is still waiting to dispatch.
+        self.assertTrue(self.feature._armed)
+        self.root.update()
+        self.assertIs(self.root.focus_get(), self.feature.key_surface)
+        self.assertTrue(self.feature._armed)
+        self.feature.key_surface.event_generate('<KeyPress-w>')
+        self.root.update()
+        self.assertGreater(self.app.state.get('base_cmd')[0], 0.)
+        self.feature.key_surface.event_generate('<KeyRelease-w>')
+        self.root.after(35, self.root.quit)
+        self.root.mainloop()
+        self.assertEqual(self.app.state.get('base_cmd'), (0., 0.))
+
+    def test_real_focus_change_to_input_stops_and_does_not_rearm_on_return(self):
+        self.root.deiconify()
+        other = tk.Entry(self.root)
+        other.pack()
+        self.arm()
+        self.root.update()
+        self.feature.key_surface.focus_force()
+        self.root.update()
+        self.feature.enable_keyboard()
+        self.root.update()
+        self.feature.key_surface.event_generate('<KeyPress-w>')
+        self.root.update()
+        self.assertTrue(self.feature.motion_active)
+        other.focus_set()
+        self.root.update()
+        self.assertFalse(self.feature._armed)
+        self.assertFalse(self.feature.motion_active)
+        self.assertEqual(self.app.state.get('base_cmd'), (0., 0.))
+        self.feature.key_surface.focus_set()
+        self.root.update()
+        self.assertFalse(self.feature._armed)
+
+    def test_public_motion_state_covers_base_and_servo_holds(self):
+        self.assertFalse(self.feature.motion_active)
+        self.arm()
+        for key in ('w', 'i', 't'):
+            self.feature.key_press(self.event(key))
+            self.assertTrue(self.feature.motion_active)
+            self.feature.stop_all()
+            self.assertFalse(self.feature.motion_active)
+            self.feature.enable_keyboard()
+
     def test_removed_keys_are_ignored_when_keyboard_is_enabled(self):
         self.arm()
         count=len(self.sent)

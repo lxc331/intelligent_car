@@ -50,7 +50,9 @@ class LaserTests(unittest.TestCase):
         monitor=LaserMonitor();message=scan_message()
         self.assertTrue(monitor.update(message,20.));self.assertFalse(monitor.update(message,22.))
         self.assertEqual(monitor.snapshot()['received_at'],20.)
-        self.assertTrue(CruisePolicy().decide(monitor.snapshot(),CruiseSettings(),22.)[3])
+        policy = CruisePolicy()
+        self.assertFalse(policy.decide(monitor.snapshot(),CruiseSettings(),22.)[3])
+        self.assertTrue(policy.waiting_for_scan)
 
     def test_partial_bad_frame_or_negative_increment_is_rejected(self):
         for message in ({},scan_message([1.]*30),dict(scan_message(),angle_increment=0.),
@@ -113,11 +115,15 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.decide(sample,settings,100.1),first)
         self.assertEqual(policy.algorithm.pid_dist.last_time,last_time)
 
-    def test_lost_scan_cancels_even_during_a_vendor_turn(self):
+    def test_lost_scan_pauses_even_during_a_vendor_turn(self):
         policy=CruisePolicy();settings=CruiseSettings()
         sample=scan(left=.4);policy.decide(sample,settings,100.)
         result=policy.decide(sample,settings,101.)
-        self.assertEqual(result[:2],(0.,0.));self.assertTrue(result[3])
+        self.assertEqual(result[:2],(0.,0.));self.assertFalse(result[3])
+        self.assertTrue(policy.waiting_for_scan)
+        resumed=policy.decide(scan(now=101.1,sequence=2),settings,101.1)
+        self.assertEqual(resumed[:2],(.06,0.));self.assertFalse(resumed[3])
+        self.assertFalse(policy.waiting_for_scan)
 
     def test_diagnostics_identify_the_actual_decision_frame_and_mode(self):
         policy=CruisePolicy();sample=scan(sequence=7,target=(25,.45))
@@ -139,13 +145,15 @@ class RunnerTests(unittest.TestCase):
 
     def tearDown(self):self.runner.stop()
 
-    def test_watchdog_stop_and_no_restart_after_recovery(self):
+    def test_scan_gap_pauses_and_resumes_without_restarting_session(self):
         self.runner.start(CruiseSettings());time.sleep(.03)
         self.assertTrue(any(m['linear']['x']>0 for m in self.sent))
-        self.now=101.;time.sleep(.15);self.assertFalse(self.runner.running)
+        self.now=101.;time.sleep(.15);self.assertTrue(self.runner.running)
+        self.assertFalse(self.runner.cancel.is_set())
         self.assertEqual(self.sent[-1]['linear']['x'],0.)
-        count=len(self.sent);self.now=102.;self.monitor.update(scan_message(sequence=2),102.)
-        time.sleep(.12);self.assertEqual(len(self.sent),count)
+        self.now=102.;self.monitor.update(scan_message(sequence=2),102.)
+        time.sleep(.12);self.assertTrue(self.runner.running)
+        self.assertGreater(self.sent[-1]['linear']['x'],0.)
 
     def test_camera_ros_and_publish_failures_cancel(self):
         for failure in ('ros','camera','publish'):
@@ -180,7 +188,7 @@ class RunnerTests(unittest.TestCase):
     def test_scan_that_expires_during_calculation_never_reaches_transport(self):
         def slow(*args):self.now=101.;return .04,.15,'turn',False
         self.runner.policy.decide=slow;self.runner.running=True
-        self.runner.step();self.assertFalse(self.runner.running)
+        self.runner.step();self.assertTrue(self.runner.running)
         self.assertEqual(self.sent[-1]['linear']['x'],0.)
 
 

@@ -91,8 +91,10 @@ class ControlSafetyTests(unittest.TestCase):
 
     def test_snapshot_survives_display_consuming_pending_frame(self):
         with tempfile.TemporaryDirectory() as folder:
+            camera = object()
             panel = types.SimpleNamespace(_pending=None, _last_frame=(0, b'jpeg-data', 'jpeg'),
-                       ctx=types.SimpleNamespace(save_dir=lambda: folder, log=self.logs.append))
+                       _frame_camera=camera, ctx=types.SimpleNamespace(app=types.SimpleNamespace(camera=camera),
+                       save_dir=lambda: folder, log=self.logs.append))
             CameraPanel.snapshot(panel)
             files = list(Path(folder).glob('*.jpg'))
             self.assertEqual(len(files), 1)

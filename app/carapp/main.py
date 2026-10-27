@@ -22,6 +22,7 @@ from carapp.config import load_config, save_config  # noqa: E402
 from carapp.core.camera import CameraStream  # noqa: E402
 from carapp.core.discovery import scan as scan_net  # noqa: E402
 from carapp.core.rosbridge import RosBridge  # noqa: E402
+from carapp.core.realtime_ros import RealtimeRosDelivery  # noqa: E402
 from carapp.core.connection import diagnose, require_wifi, search_prefixes  # noqa: E402
 from carapp.core.connection_profiles import plan_connection, apply_connection  # noqa: E402
 from carapp.features import FEATURES  # noqa: E402
@@ -60,6 +61,7 @@ class App:
         self._log_queue = queue.Queue()
         self._ui_queue = queue.Queue()
         self._connection_generation = 0
+        self._realtime_ros = RealtimeRosDelivery()
         self._scan_running = False
         self._connection_notice = None
         self._nodes_timer = None
@@ -133,20 +135,45 @@ class App:
         car = self.cfg["car"]
         self._connection_generation += 1
         generation = self._connection_generation
+        handlers, resets = {}, []
+        for feature in self.features:
+            for topic, callback in getattr(feature, "realtime_ros_handlers", lambda: {})().items():
+                handlers.setdefault(topic, []).append(callback)
+            reset = getattr(feature, "reset_realtime_ros", None)
+            if reset:
+                resets.append(reset)
+        self._realtime_ros.begin(generation, handlers, resets)
         if self.bridge:
             self.bridge.stop()
         def post(callback):
             return lambda *args: self._post(self._session_callback, generation, callback, *args)
         self.bridge = RosBridge(
             car["host"], int(car["ws_port"]),
-            # Timestamp at transport receipt: queued old scans must not look fresh.
-            on_message=lambda topic, msg: self._post(self._session_callback, generation,
-                self._on_ros_message, topic, msg, time.monotonic()),
-            on_status=post(self._on_ros_status),
+            on_message=lambda topic, msg: self._receive_ros_message(generation, topic, msg),
+            on_status=lambda connected, detail="": self._receive_ros_status(generation, connected, detail),
             log=post(self.log),
             connection_guard=self._connection_guard(),
         )
         self.bridge.start()
+
+    def _receive_ros_message(self, generation, topic, msg):
+        # Timestamp at receipt, before any wait. Sensor callbacks never touch Tk.
+        received_at = time.monotonic()
+        if self._closing:
+            return
+        if self._realtime_ros.handles(topic):
+            self._realtime_ros.deliver(generation, topic, msg, received_at)
+        else:
+            self._post(self._session_callback, generation, self._on_ros_message, topic, msg, received_at)
+
+    def _receive_ros_status(self, generation, connected, detail=""):
+        if not self._closing and self._realtime_ros.set_connected(generation, connected):
+            self._post(self._session_callback, generation, self._on_ros_status, connected, detail)
+
+    def _invalidate_ros_data(self):
+        delivery = getattr(self, "_realtime_ros", None)
+        if delivery:
+            delivery.invalidate()
 
     def _on_ros_status(self, connected, detail=""):
         if self._closing:
@@ -170,8 +197,12 @@ class App:
             self.bridge.subscribe("/odom", throttle_ms=100)
             self.bridge.subscribe("/ros_robot_controller/battery", throttle_ms=1000)
             for feature in getattr(self, "features", []):
+                types = getattr(feature, "ros_subscription_types", lambda: {})()
                 for topic, throttle in getattr(feature, "ros_subscriptions", lambda: {})().items():
-                    self.bridge.subscribe(topic, throttle_ms=throttle)
+                    options = {"throttle_ms": throttle}
+                    if topic in types:
+                        options["message_type"] = types[topic]
+                    self.bridge.subscribe(topic, **options)
             self._request_nodes()
 
     def _on_ros_message(self, topic, msg, received_at=None):
@@ -256,6 +287,7 @@ class App:
         if self.ctx.motion_in_use():
             self.log("正在停止上台车的运动线程，请稍后再切换")
             return False
+        self._invalidate_ros_data()
         for feature in self.features:
             if hasattr(feature,"on_vehicle_change"):
                 feature.on_vehicle_change()
@@ -362,7 +394,9 @@ class App:
         try:
             self.topbar.update_state(st)
             for feat in self.features:
-                feat.on_tick(st)
+                feat.on_background_tick(st)
+            if self._active_feature:
+                self._active_feature.on_tick(st)
         except Exception as exc:
             self.log("界面刷新异常：%s" % exc)
 
@@ -393,8 +427,20 @@ class App:
         if not window_has_focus(self.root):
             self._had_window_focus = False
             for feature in self.features:
-                if hasattr(feature, "stop_all"):
+                if (getattr(feature, "stop_on_focus_loss", True)
+                        and getattr(feature, "motion_active", True) and hasattr(feature, "stop_all")):
                     feature.stop_all()
+
+    def stop_all_motion(self):
+        """Explicit user stop, including autonomous motion on a hidden page."""
+        for feature in self.features:
+            if hasattr(feature, "stop_all"):
+                try:
+                    feature.stop_all()
+                except Exception as exc:
+                    self.log("停止动作时发生异常：%s" % exc)
+        self.ctx.stop_base()
+        self.log("已停止全部运动；需要手动重新启动")
 
     def select_tab(self, key):
         """按功能 key 选中选项卡，key 找不到就保持默认。"""
@@ -407,6 +453,7 @@ class App:
     # ---------------- 退出 ----------------
     def on_close(self):
         self._closing = True
+        self._invalidate_ros_data()
         for timer in (self._nodes_timer, self._recover_timer, self._focus_timer, self._tick_timer):
             if timer:
                 try:

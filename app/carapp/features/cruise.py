@@ -20,9 +20,10 @@ from carapp.ui.camerapanel import CameraPanel
 class CruiseFeature(Feature):
     key = "cruise"
     title = "自动巡航 + 实时画面"
+    stop_on_focus_loss = False
     MODES = {"avoid": "雷达避障", "follow": "雷达跟随", "guard": "雷达警卫"}
     MODE_HELP = {
-        "avoid": "雷达避障：前方扫描范围内的最近距离达到检测距离时，按厂家策略前进转弯。",
+        "avoid": "雷达避障：前方扫描范围内的最近距离达到检测距离时，按原策略前进转弯。",
         "follow": "雷达跟随：追踪检测距离内的最近目标，会前进、后退和转向；距离控制目标为检测距离的一半。",
         "guard": "雷达警卫：朝向检测距离内的最近目标，只转向，不前进或后退。",
     }
@@ -109,7 +110,7 @@ class CruiseFeature(Feature):
                                fg=theme.TEXT_DIM, font=theme.FONT_SMALL, anchor="w")
         self.sensor.pack(fill="x")
         hint = tk.Label(panel, text="采用原厂雷达避障、跟随和警卫策略，按配置的前方检测角处理雷达数据。"
-                            "切页、失焦、连接中断或雷达数据失效会停止；录像和关键帧直接保存在电脑。",
+                            "切页、失焦后继续巡航；雷达超时暂时停车，新数据恢复后自动继续。顶部可停止全部。",
                  bg=theme.PANEL, fg=theme.TEXT_DIM, font=theme.FONT_SMALL,
                  wraplength=1050, justify="left", anchor="w")
         hint.pack(fill="x", pady=(6, 0))
@@ -184,6 +185,12 @@ class CruiseFeature(Feature):
     def ros_subscriptions(self):
         return {"/scan_raw": 100}
 
+    def realtime_ros_handlers(self):
+        return {"/scan_raw": self.monitor.update}
+
+    def reset_realtime_ros(self):
+        self.monitor.reset()
+
     def on_ros_message(self, topic, msg, received_at):
         if topic == "/scan_raw":
             self.monitor.update(msg, received_at)
@@ -198,7 +205,10 @@ class CruiseFeature(Feature):
             return
         try:
             scan = self.monitor.snapshot()
-            check = CruisePolicy().decide(scan, self.runner.settings, self.runner.clock())
+            probe = CruisePolicy()
+            check = probe.decide(scan, self.runner.settings, self.runner.clock())
+            if probe.waiting_for_scan:
+                raise ValueError("请等待有效的新雷达数据后再启动巡航")
             if check[3]:
                 raise ValueError(check[2])
             camera = self.ctx.app.camera
@@ -278,16 +288,21 @@ class CruiseFeature(Feature):
 
     def on_deactivate(self):
         self.active = False
-        self.stop_all()
 
     def on_vehicle_change(self):
         self.stop_all()
         self.monitor.reset()
 
-    def on_tick(self, st):
+    def on_background_tick(self, st):
+        status = dict(cruise_running=self.runner.running,
+                      cruise_waiting=self.runner.running and self.runner.policy.waiting_for_scan)
+        st.update(status)
+        self.ctx.state.update(**status)
         self._flush_frames()
         if self.record_dir and not self.runner.running:
             self._finish_record()
+
+    def on_tick(self, st):
         scan = self.monitor.snapshot()
         age = time.monotonic()-scan["received_at"]
         fresh = 0 <= age <= LaserMonitor.TIMEOUT and not scan["error"]
@@ -313,7 +328,8 @@ class CruiseFeature(Feature):
         else:
             nearest = [values[key] for key in ("left", "right") if values.get(key) is not None]
             target_text = "%.2f m" % min(nearest) if nearest else "未知"
-        self.phase.config(text=self.runner.phase, fg=theme.OK if self.runner.running else theme.TEXT)
+        self.phase.config(text=self.runner.phase, fg=theme.WARN if self.runner.policy.waiting_for_scan
+                          and self.runner.running else theme.OK if self.runner.running else theme.TEXT)
         self.sensor.config(text="雷达 %s｜左前 %s｜右前 %s｜最近目标 %s｜%s" %
                            ("就绪" if fresh else "不可用", distance("left"), distance("right"), target_text,
                             "延迟 %.2f s" % age if scan["received_at"] else "等待数据"),

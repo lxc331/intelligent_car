@@ -1,27 +1,28 @@
-"""Compact, focus-scoped base controls for pages which share a live workspace."""
+"""Compact base controls with background permission checks and visible rendering.
+
+The page calls on_background_tick every 100 ms to refresh motion permission;
+on_tick only updates the controls' text while that page is selected.
+"""
 import math
 import threading
-import time
 import tkinter as tk
 
 from carapp.core.teleop import BASE_KEYS, TeleopController
 from carapp.ui import theme
+from carapp.ui.focus import widget_has_focus
 
 
 class _MotionGate:
     """The worker consumes permission; Tk callbacks are evaluated by the UI only.
 
-    A separate publication deadline also stops motion if the UI stops ticking.
-    It does not change the existing remote-control page's controller policy.
+    Held commands have no elapsed-time limit. Connection and page permission
+    remain required for every nonzero publication.
     """
-    def __init__(self, ctx, clock=time.monotonic):
+    def __init__(self, ctx):
         self.ctx = ctx
         self.cfg = ctx.cfg
         self.state = ctx.state
-        self.clock = clock
         self.allowed = threading.Event()
-        self.deadline = None
-        self.expired = False
         self.lock = threading.Lock()
 
     def log(self, message):
@@ -32,18 +33,9 @@ class _MotionGate:
             if any((vx, vy, wz)):
                 if not self.allowed.is_set():
                     return False
-                now = self.clock()
-                if self.deadline is None:
-                    self.deadline = now + 5.
-                    self.expired = False
-                if now >= self.deadline:
-                    self.expired = True
-                    return False
             return self.ctx.publish_twist(vx, wz, quiet=quiet, vy=vy)
 
     def stop_base(self):
-        with self.lock:
-            self.deadline = None
         self.ctx.stop_base()
 
 
@@ -51,7 +43,8 @@ class TeleopPanel(tk.Frame):
     """Mouse/key base control, active only after the enclosing page enables it.
 
     ``ready`` runs on the Tk thread and must query the enclosing feature's public
-    motion ownership and connection state. ``on_tick`` should run every 100 ms.
+    motion ownership and connection state. ``on_background_tick`` checks these
+    every 100 ms; ``on_tick`` only renders the currently selected page.
     No key bindings are installed on the root window or other input fields.
     """
     def __init__(self, parent, ctx, ready=None):
@@ -167,12 +160,18 @@ class TeleopPanel(tk.Frame):
         selected.pack(fill="x", padx=6, pady=2, before=self.status)
 
     def focus_lost(self, _event=None):
-        self.stop()
+        if _event is not None and widget_has_focus(self.key_surface):
+            return
+        if self._armed or self.motion_active:
+            self.stop()
 
     def set_active(self, active):
         self._active = bool(active)
         if not active:
-            self.stop()
+            if self._armed or self.motion_active:
+                self.stop()
+            else:
+                self._gate.allowed.clear()
 
     def enable_keyboard(self):
         self.stop()
@@ -257,18 +256,18 @@ class TeleopPanel(tk.Frame):
                 self.controller.release(self._mouse_key)
         self._mouse_key = None
 
-    def on_tick(self, state):
+    def on_background_tick(self, state):
         if not self._refresh_permission():
             if self.motion_active or self._armed:
                 self.stop()
+
+    def on_tick(self, state):
         with self.controller.lock:
             keys = " / ".join(sorted(self.controller.pressed)).upper()
-        if self._gate.expired:
-            text = "本次移动已满 5 秒，已停止；松开按键或按钮后重新操作。"
-        elif self.mode.get() == "keyboard":
+        if self.mode.get() == "keyboard":
             text = ("键盘已启用：%s" % (keys or "等待按键，空格/Esc 停止")) if self._armed else "键盘未启用；点击启用后操作，离开焦点即停。"
         else:
-            text = "鼠标：按住移动，松开或移出即停；单次最长 5 秒。"
+            text = "鼠标：按住持续移动，松开或移出即停；无行驶时长限制。"
         self.status.config(text=text, fg=theme.OK if keys else theme.TEXT_DIM)
 
     def close(self):

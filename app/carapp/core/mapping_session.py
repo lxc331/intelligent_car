@@ -14,6 +14,8 @@ class MappingSession:
         self._state = dict(connected=False, running=False, owned=False, busy=False,
                            operation="", detail="未连接建图服务")
         self._thread = None
+        self._active_operation = ""
+        self._pending = None
 
     def snapshot(self):
         with self._lock:
@@ -23,17 +25,27 @@ class MappingSession:
         if operation not in ("connect", "start", "stop", "status", "save_map", "list_directories"):
             raise ValueError("未知建图操作")
         with self._lock:
-            if self._closed.is_set() or self._state["busy"]:
+            if self._closed.is_set():
                 return False
             if operation != "connect" and not self._state["connected"]:
                 return False
+            if self._state["busy"]:
+                # One user action may follow an in-flight background status
+                # query. Do not interrupt its SSH channel or replay actions.
+                if (self._active_operation == "status" and self._pending is None
+                        and operation not in ("status", "connect")):
+                    self._pending = (operation, args, kwargs)
+                    self._state["operation"] = operation
+                    return True
+                return False
             self._state.update(busy=True, operation=operation)
+            self._active_operation = operation
             self._thread = threading.Thread(target=self._run, args=(operation, args, kwargs),
                                             name="mapping-" + operation, daemon=True)
             self._thread.start()
         return True
 
-    def _run(self, operation, args, kwargs):
+    def _execute_operation(self, operation, args, kwargs):
         try:
             result = getattr(self.remote, operation)(*args, **kwargs) or {}
             with self._lock:
@@ -62,12 +74,26 @@ class MappingSession:
                     self._state.update(running=False, owned=False)
                 self._state["detail"] = str(exc)
             self.events.put(dict(operation=operation, result=getattr(exc, "partial", {}), error=str(exc)))
-        finally:
+
+    def _run(self, operation, args, kwargs):
+        while True:
+            self._execute_operation(operation, args, kwargs)
             with self._lock:
-                self._state.update(busy=False, operation="")
                 closing = self._closed.is_set()
+                pending, self._pending = self._pending, None
+                if not closing and pending and self._state["connected"]:
+                    operation, args, kwargs = pending
+                    self._active_operation = operation
+                    self._state["operation"] = operation
+                    continue
+                if not closing and pending:
+                    self.events.put(dict(operation=pending[0], result={},
+                                         error="建图连接已断开，请重新连接后再操作"))
+                self._state.update(busy=False, operation="")
+                self._active_operation = ""
             if closing:
                 self._cleanup()
+            return
 
     def drain(self):
         result = []

@@ -227,6 +227,29 @@ class VendorCruiseWidgetTests(unittest.TestCase):
         feature.on_tick({})
         self.assertIn("左前 0.45 m｜右前 0.82 m", feature.sensor.cget("text"))
 
+    def test_global_stop_button_remains_available_with_hidden_cruise(self):
+        from carapp.main import App
+        from carapp.ui.topbar import TopBar
+        self.app.ctx=AppContext(self.app)
+        self.app.stop_all_motion=lambda:App.stop_all_motion(self.app)
+        bar=TopBar(self.root,self.app)
+        self.feature.runner.running=True
+        self.feature.on_deactivate()
+        self.assertTrue(self.feature.runner.running)
+        self.feature.on_background_tick(self.state.snapshot())
+        bar.update_state(self.state.snapshot())
+        self.assertIn("后台",bar.lbl_cruise.cget("text"))
+        bar.btn_stop_all.invoke()
+        self.assertFalse(self.feature.motion_active)
+
+    def test_background_wait_state_is_visible_without_finishing_recording(self):
+        self.feature.runner.running=True
+        self.feature.runner.policy.wait_for_scan()
+        state=self.state.snapshot()
+        self.feature.on_background_tick(state)
+        self.assertTrue(state['cruise_running'])
+        self.assertTrue(state['cruise_waiting'])
+
 
 if __name__ == "__main__":
     unittest.main()

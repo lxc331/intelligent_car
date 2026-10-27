@@ -36,6 +36,7 @@ class RosBridge:
         self._connected = False
         self._thread = None
         self._subs = {}          # topic -> throttle_ms
+        self._sub_types = {}     # topic -> explicit type, usable before publishers start
         self._svc_waiters = {}   # id -> callback
         self._svc_seq = 0
 
@@ -58,12 +59,19 @@ class RosBridge:
     def publish(self, topic, msg):
         return self._send({"op": "publish", "topic": topic, "msg": msg})
 
-    def subscribe(self, topic, throttle_ms=0):
+    def subscribe(self, topic, throttle_ms=0, *, message_type=None):
         self._subs[topic] = throttle_ms
+        if message_type is not None:
+            self._sub_types[topic] = message_type
+        return self._send(self._subscription_payload(topic, throttle_ms))
+
+    def _subscription_payload(self, topic, throttle_ms):
         payload = {"op": "subscribe", "topic": topic}
         if throttle_ms:
             payload["throttle_rate"] = throttle_ms
-        return self._send(payload)
+        if topic in self._sub_types:
+            payload["type"] = self._sub_types[topic]
+        return payload
 
     def call_service(self, service, args=None, callback=None):
         self._svc_seq += 1
@@ -121,10 +129,7 @@ class RosBridge:
                 self.log("已连接 rosbridge ws://%s:%d" % (self.host, self.port))
                 # 重连后把之前的订阅补回来
                 for topic, throttle in list(self._subs.items()):
-                    payload = {"op": "subscribe", "topic": topic}
-                    if throttle:
-                        payload["throttle_rate"] = throttle
-                    ws.send_text(json.dumps(payload))
+                    ws.send_text(json.dumps(self._subscription_payload(topic, throttle)))
                 ws.sock.settimeout(None)
                 threading.Thread(target=self._heartbeat, args=(ws, heartbeat_done),
                                  name="ros-heartbeat", daemon=True).start()

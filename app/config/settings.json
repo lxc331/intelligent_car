@@ -1,6 +1,6 @@
 {
   "car": {
-    "host": "10.42.0.135",
+    "host": "192.168.137.36",
     "http_port": 8080,
     "ws_port": 9090,
     "subnet_prefix": "192.168.150",
@@ -8,9 +8,9 @@
       "192.168.150",
       "192.168.149"
     ],
-    "profile_id": "HW-10CCA58E",
+    "profile_id": "HW-A0857935",
     "transport": "sta",
-    "sta_ssid": "xiaomi"
+    "sta_ssid": "MJU-IT"
   },
   "cars": [
     {
@@ -28,8 +28,8 @@
       "id": "HW-A0857935",
       "wifi_host": "192.168.149.1",
       "ssid": "HW-A0857935",
-      "sta_host": "192.168.137.192",
-      "sta_ssid": "Win11_Meng_plus"
+      "sta_host": "192.168.137.36",
+      "sta_ssid": "MJU-IT"
     }
   ],
   "base": {

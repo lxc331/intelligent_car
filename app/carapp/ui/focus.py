@@ -3,6 +3,14 @@
 import tkinter as tk
 
 
+def widget_has_focus(widget):
+    """Read current focus without converting native Tcl widgets to Python objects."""
+    try:
+        return str(widget.tk.call("focus")) == str(widget)
+    except tk.TclError:
+        return False
+
+
 def window_has_focus(window):
     """Include a window's combobox popup, but exclude other top-level windows."""
     try:

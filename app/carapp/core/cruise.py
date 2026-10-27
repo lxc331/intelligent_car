@@ -20,7 +20,7 @@ class CruiseSettings:
             if not isinstance(value,(float,int)) or isinstance(value,bool) or not math.isfinite(value):
                 raise ValueError("巡航参数须为有限数值")
         if not .30<=self.detection_distance<=1.50:
-            raise ValueError("检测距离须为 0.30–1.50 米（厂家范围）")
+            raise ValueError("检测距离须为 0.30–1.50 米（原范围）")
         if not .02<=self.speed<=.15:
             raise ValueError("移动速度须为 0.02–0.15 米/秒")
         if not 0<=self.scan_angle<=90:
@@ -34,6 +34,7 @@ class CruisePolicy:
     def __init__(self, settings=None, clock=None):
         self.settings = self.algorithm = self.last_sequence = self.last_scan = None
         self.phase = "待机"
+        self.waiting_for_scan = False
         self.clock = clock or time.monotonic
         if settings:
             self._configure(settings,self.clock())
@@ -48,15 +49,25 @@ class CruisePolicy:
         return dict(self.algorithm.diagnostics,command=self.algorithm.command,
                     scan_sequence=self.last_sequence) if self.algorithm else {}
 
+    def wait_for_scan(self):
+        self.waiting_for_scan = True
+        if self.algorithm:
+            self.algorithm.command = (0.,0.)
+        self.phase = "雷达数据暂时中断，已暂停行驶；新数据恢复后自动继续"
+        return 0.,0.,self.phase,False
+
     def decide(self, scan, settings, now):
         self.last_scan = scan
         age = now-scan.get("received_at",0.)
-        if age<-.01 or age>LaserMonitor.TIMEOUT:
-            return 0.,0.,"雷达数据超时，已停止，请重新启动",True
+        if age<-.01:
+            return 0.,0.,"雷达接收时间无效，已停止，请重新启动",True
+        if age>LaserMonitor.TIMEOUT:
+            return self.wait_for_scan()
         if scan.get("error"):
             return 0.,0.,scan["error"],True
-        if settings!=self.settings:
+        if settings!=self.settings or self.waiting_for_scan:
             self._configure(settings,now)
+            self.waiting_for_scan = False
         if scan["sequence"]!=self.last_sequence:
             try:
                 self.algorithm.update(scan,now)
@@ -101,7 +112,10 @@ class CruiseRunner:
                 raise ValueError("ROS 尚未连接")
             if not self.ctx.state.get("cam_connected"):
                 raise ValueError("请等待实时画面就绪后再启动巡航")
-            check = CruisePolicy().decide(self.monitor.snapshot(),settings,self.clock())
+            probe = CruisePolicy()
+            check = probe.decide(self.monitor.snapshot(),settings,self.clock())
+            if probe.waiting_for_scan:
+                raise ValueError("请等待有效的新雷达数据后再启动巡航")
             if check[3]:
                 raise ValueError(check[2])
             self.settings,self.policy = settings,CruisePolicy(settings,clock=self.clock)
@@ -123,8 +137,8 @@ class CruiseRunner:
             else:
                 scan = self.monitor.snapshot()
                 decision = self.policy.decide(scan,self.settings,self.clock())
-                if self.clock()-scan.get("received_at",0.)>LaserMonitor.TIMEOUT:
-                    decision = (0.,0.,"雷达计算期间数据已超时，已取消巡航",True)
+                if not decision[3] and self.clock()-scan.get("received_at",0.)>LaserMonitor.TIMEOUT:
+                    decision = self.policy.wait_for_scan()
             vx,wz,text,fatal = decision
             if fatal:
                 self.running = False

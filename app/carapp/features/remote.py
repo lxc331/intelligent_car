@@ -5,6 +5,7 @@ from carapp.core.teleop import CONTROL_KEYS, TeleopController
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.camerapanel import CameraPanel
+from carapp.ui.focus import widget_has_focus
 
 
 class RemoteFeature(Feature):
@@ -126,7 +127,19 @@ class RemoteFeature(Feature):
         self.key_surface.bind("<FocusOut>", self.focus_lost)
 
     def focus_lost(self, _event=None):
-        self.stop_all()
+        # FocusOut is queued: a preceding event can arrive after re-arming has
+        # already returned focus to this surface. Only a current loss stops it.
+        if _event is not None and widget_has_focus(self.key_surface):
+            return
+        if self._armed or self.motion_active:
+            self.stop_all()
+
+    @property
+    def motion_active(self):
+        if not self.controller:
+            return False
+        with self.controller.lock:
+            return bool(self.controller.pressed or any(self.controller.last_twist))
 
     def _ready(self):
         if not self._active or not self.ctx.state.get("ws_connected"):
@@ -217,7 +230,8 @@ class RemoteFeature(Feature):
 
     def on_deactivate(self):
         self._active = False
-        self.stop_all()
+        if self._armed or self.motion_active:
+            self.stop_all()
 
     def on_vehicle_change(self):
         self.stop_all()

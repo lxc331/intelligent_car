@@ -48,7 +48,7 @@ class AppContext:
 
     def motion_in_use(self, exclude=None):
         """查询其他功能是否仍占用底盘，包括停止过程中的运动线程。"""
-        return any(feature.motion_active for feature in self.app.features if feature is not exclude)
+        return any(feature.motion_active for feature in getattr(self.app, "features", ()) if feature is not exclude)
 
     def save_dir(self, sub=""):
         base = self.cfg["camera"].get("save_dir", "捕获")
@@ -124,12 +124,17 @@ class AppContext:
             self.publish_twist(0.0, 0.0, quiet=True)
         self.state.update(base_cmd=(0.0, 0.0), base_vy=0.0)
 
+    def stop_all_motion(self):
+        """Stop autonomous and manual motion, including hidden pages."""
+        self.app.stop_all_motion()
+
 
 class Feature:
     """所有功能选项卡的基类。"""
 
     key = "base"
     title = "功能"
+    stop_on_focus_loss = True
 
     def __init__(self, ctx: AppContext):
         self.ctx = ctx
@@ -144,7 +149,25 @@ class Feature:
         raise NotImplementedError
 
     def on_tick(self, st):
-        """主循环每 100ms 调一次，st 是 CarState.snapshot()。"""
+        """仅当前页面每 100ms 绘制一次，st 是 CarState.snapshot()。"""
+
+    def on_background_tick(self, st):
+        """所有页面每 100ms 维护后台任务；不解码视频或绘制地图。"""
+
+    def realtime_ros_handlers(self):
+        """topic -> ROS 线程纯数据回调，禁止访问 Tk 控件。
+
+        注册为实时通路的话题不再调用 on_ros_message；该话题的所有
+        消费者均须在此注册，其他话题继续使用原界面队列通路。
+        """
+        return {}
+
+    def ros_subscription_types(self):
+        """Explicit types for topics whose publishers may be started later."""
+        return {}
+
+    def reset_realtime_ros(self):
+        """连接会话更换时清空实时数据，由消息路由锁保护。"""
 
     def on_close(self):
         """关闭程序时的清理。"""

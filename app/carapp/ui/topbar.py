@@ -106,6 +106,12 @@ class TopBar(tk.Frame):
         right = tk.Frame(self, bg=theme.PANEL)
         right.pack(fill="x", padx=10, pady=(3, 7))
 
+        # Reserve the stop button before status chips, including narrow windows.
+        self.btn_stop_all = tk.Button(right, text="■ 停止全部", command=app.stop_all_motion,
+                                     bg=theme.PANEL_2, fg=theme.ERR, relief="flat",
+                                     activebackground=theme.BORDER, font=theme.FONT_SMALL, padx=10)
+        self.btn_stop_all.pack(side="right", padx=(10, 2))
+
         self.lbl_conn = _chip(right, "ROS 连接")
         self.lbl_node = _chip(right, "节点数")
         self.lbl_batt = _chip(right, "电池")
@@ -113,6 +119,7 @@ class TopBar(tk.Frame):
         self.lbl_cam = _chip(right, "摄像头")
         self.lbl_grip = _chip(right, "夹爪目标")
         self.lbl_base = _chip(right, "底盘")
+        self.lbl_cruise = _chip(right, "自动巡航")
         self.sync_selection()
 
     # ---------- 交互 ----------
@@ -255,6 +262,9 @@ class TopBar(tk.Frame):
 
     # ---------- 刷新 ----------
     def update_state(self, st):
+        running, waiting = st.get("cruise_running"), st.get("cruise_waiting")
+        self.lbl_cruise.config(text="等待雷达，自动恢复" if running and waiting else "运行中（支持后台）" if running else "已停止",
+                               fg=theme.WARN if running and waiting else theme.OK if running else theme.TEXT_DIM)
         if st["ws_connected"]:
             self.lbl_conn.config(text="● 已连接", fg=theme.OK)
         else:

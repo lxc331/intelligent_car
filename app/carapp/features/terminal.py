@@ -31,6 +31,8 @@ class TerminalFeature(Feature):
         self._items={}
         self._closed=False
         self._last_dimensions=None
+        self._pending_directory=None
+        self._pending_files=[]
 
     def build(self,parent):
         self.parent=parent
@@ -179,6 +181,8 @@ class TerminalFeature(Feature):
 
     def on_vehicle_change(self):
         self.disconnect()
+        self._pending_directory=None
+        self._pending_files.clear()
         self._listing_request=-1
         self._items.clear()
         self.tree.delete(*self.tree.get_children())
@@ -319,16 +323,13 @@ class TerminalFeature(Feature):
         viewer.configure(yscrollcommand=scroll.set)
         viewer.insert("1.0",text);viewer.configure(state="disabled")
 
-    def on_tick(self,st):
+    def on_background_tick(self,st):
         if self._closed:return
         if self.identity()!=self._identity:
             self.on_vehicle_change()
             self._identity=self.identity()
             self.update_peer()
         if not self.available:return
-        if not self._auto_attempted and self.ctx.cfg["terminal"].get("auto_connect",True):
-            if self.ctx.app.nb.index("current")==self.ctx.app.features.index(self) and self.password.get():
-                self.connect()
         for _ in range(150):
             try:generation,kind,data=self.session.events.get_nowait()
             except queue.Empty:break
@@ -345,9 +346,24 @@ class TerminalFeature(Feature):
                 self.connect_button.configure(state="normal")
                 self.ctx.log("SSH："+data)
                 self.model.feed("\r\n["+data+"]\r\n")
-            elif kind=="directory":self.directory_result(data)
-            elif kind=="file":self.file_result(data)
+            elif kind=="directory":
+                if data["request_id"]==self._listing_request and data["scope"]==self.remote_scope():
+                    self._pending_directory=(generation,data)
+            elif kind=="file":self._pending_files.append((generation,data))
             elif kind=="operation_error":self.file_status.configure(text="读取失败："+data["error"])
+
+    def on_tick(self,st):
+        if self._closed or not self.available:return
+        if not self._auto_attempted and self.ctx.cfg["terminal"].get("auto_connect",True):
+            if self.ctx.app.nb.index("current")==self.ctx.app.features.index(self) and self.password.get():
+                self.connect()
+        if self._pending_directory:
+            generation,data=self._pending_directory
+            self._pending_directory=None
+            if generation==self.session.generation:self.directory_result(data)
+        files,self._pending_files=self._pending_files,[]
+        for generation,data in files:
+            if generation==self.session.generation:self.file_result(data)
         self.fit_terminal()
         if self.model.dirty:
             content,cursor=self.model.render()

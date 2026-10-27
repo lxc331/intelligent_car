@@ -2,6 +2,7 @@
 import copy
 import tempfile
 import time
+import threading
 import tkinter as tk
 import types
 import unittest
@@ -10,6 +11,7 @@ from unittest.mock import patch, Mock
 from carapp.config import DEFAULTS
 from carapp.features.base import AppContext
 from carapp.features.mapping import MappingFeature
+from carapp.core.mapping_session import MappingSession
 from carapp.model.state import CarState
 
 
@@ -48,6 +50,7 @@ class MappingFeatureTests(unittest.TestCase):
         self.app = types.SimpleNamespace(cfg=copy.deepcopy(DEFAULTS), state=self.state, root=self.root,
             camera=None, features=[], frame_listeners=[], log=self.logs.append,
             bridge=types.SimpleNamespace(publish=lambda topic,msg:self.sent.append(msg) or True))
+        self.app.bridge.subscribe = Mock(return_value=True)
         self.feature = MappingFeature(AppContext(self.app))
         with patch("carapp.features.mapping.MappingCamera", Camera), \
              patch("carapp.features.mapping.local_password", return_value=""):
@@ -94,6 +97,61 @@ class MappingFeatureTests(unittest.TestCase):
         self.feature.on_deactivate()
         self.assertFalse(self.feature._ready())
 
+    def test_status_poll_does_not_disable_start_but_foreground_action_does(self):
+        self.session.state.update(busy=True, operation="status")
+        self.feature.on_tick(self.state.snapshot())
+        self.assertEqual(self.feature.btn_start.cget("state"), "normal")
+        self.assertEqual(self.feature.btn_browse.cget("state"), "normal")
+        self.session.state.update(operation="save_map")
+        self.feature.on_tick(self.state.snapshot())
+        self.assertEqual(self.feature.btn_start.cget("state"), "disabled")
+
+    def test_completed_poll_waits_full_interval_before_next_poll(self):
+        self.feature._last_poll = time.monotonic()-30
+        self.feature._handle_event(dict(operation="status", error=None,
+                                        result=dict(connected=True, running=False)))
+        self.feature.on_background_tick(self.state.snapshot())
+        self.assertFalse(any(args[0] == "status" for args, _ in self.session.calls))
+
+    def test_start_button_during_slow_poll_dispatches_after_query_finishes(self):
+        entered, release, started = threading.Event(), threading.Event(), threading.Event()
+        class Backend:
+            def connect(self):
+                return dict(connected=True, running=False, owned=False)
+            def status(self):
+                entered.set(); release.wait(2)
+                return dict(connected=True, running=False, owned=False)
+            def start(self):
+                started.set()
+                return dict(connected=True, running=True, owned=True)
+            def stop(self):
+                return dict(running=False, owned=False)
+            def close(self):
+                pass
+        session = MappingSession(Backend())
+        session.submit("connect")
+        end = time.monotonic()+2
+        while session.snapshot()["busy"] and time.monotonic()<end:
+            time.sleep(.005)
+        self.assertTrue(session.snapshot()["connected"])
+        self.feature.session = session
+        self.feature.engaged = False
+        session.drain()
+        session.submit("status")
+        self.assertTrue(entered.wait(1))
+        try:
+            self.feature.on_tick(self.state.snapshot())
+            self.assertEqual(self.feature.btn_start.cget("state"), "normal")
+            with patch.object(self.feature, "_start_record") as record:
+                self.feature.btn_start.invoke()
+            record.assert_called_once()
+            self.assertEqual(session.snapshot()["operation"], "start")
+            self.assertFalse(started.is_set())
+            release.set()
+            self.assertTrue(started.wait(1))
+        finally:
+            release.set()
+
     def test_save_uses_fixed_app_root_and_explicit_host_scope(self):
         self.feature.remote_dir.set("/home/pi/maps")
         self.feature.scope.set("小车宿主机")
@@ -125,7 +183,7 @@ class MappingFeatureTests(unittest.TestCase):
         self.feature._was_connected = True
         st = self.state.snapshot()
         st["ws_connected"] = False
-        self.feature.on_tick(st)
+        self.feature.on_background_tick(st)
         self.assertIsNone(self.feature.session)
         self.assertFalse(any(args[0] == "start" for args, _ in self.session.calls))
 
@@ -140,15 +198,34 @@ class MappingFeatureTests(unittest.TestCase):
             result=dict(running=True, owned=True, status="stop_failed")))
         self.assertIn("尚未停止", self.feature.status.cget("text"))
 
+    def test_started_slam_retries_map_subscription_with_an_explicit_type(self):
+        self.feature._handle_event(dict(operation="start",error=None,result=dict(owned=True,running=True)))
+        self.app.bridge.subscribe.assert_called_once_with("/map",throttle_ms=1000,
+                                                         message_type="nav_msgs/msg/OccupancyGrid")
+
     def test_camera_replacement_requires_explicit_reattach_and_keeps_slam(self):
         record = Mock()
         record.camera = object()
         self.feature._record = record
-        self.feature.on_tick(self.state.snapshot())
+        self.feature.on_background_tick(self.state.snapshot())
         self.assertFalse(self.feature.engaged)
         self.assertIsNone(self.feature._record)
         record.finish.assert_called_once()
         self.assertFalse(any(args[0] == "stop" for args, _ in self.session.calls))
+
+    def test_hidden_page_drains_session_and_checks_permission_without_drawing(self):
+        self.feature.on_deactivate()
+        event = dict(operation="status", error=None, result=dict(running=False))
+        self.session.drain = Mock(return_value=[event])
+        with patch.object(self.feature, "_handle_event") as handle, \
+             patch.object(self.feature.teleop, "on_background_tick") as permission, \
+             patch.object(self.feature.map_panel, "on_tick") as draw_map, \
+             patch.object(self.feature.cam, "on_tick") as draw_camera:
+            self.feature.on_background_tick(self.state.snapshot())
+        handle.assert_called_once_with(event)
+        permission.assert_called_once()
+        draw_map.assert_not_called()
+        draw_camera.assert_not_called()
 
 
 if __name__ == "__main__":

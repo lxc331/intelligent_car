@@ -69,6 +69,56 @@ class MappingSessionTests(unittest.TestCase):
         self.assertFalse(session.snapshot()["connected"])
         self.assertFalse(session.submit("start"))
 
+    def slow_status(self, connected=True):
+        session, backend = self.session()
+        entered, release = threading.Event(), threading.Event()
+        backend.start_called = threading.Event()
+        def status():
+            entered.set()
+            release.wait(2)
+            return dict(connected=connected, running=False, owned=False)
+        def start():
+            backend.start_called.set()
+            return dict(running=True, owned=True)
+        backend.status, backend.start = status, start
+        session.drain()
+        session.submit("status")
+        self.assertTrue(entered.wait(1))
+        self.addCleanup(release.set)
+        return session, backend, release
+
+    def test_explicit_start_waits_for_status_then_runs_once(self):
+        session, backend, release = self.slow_status()
+        self.assertTrue(session.submit("start"))
+        self.assertEqual(session.snapshot()["operation"], "start")
+        self.assertFalse(backend.start_called.is_set())
+        self.assertFalse(session.submit("start"))
+        self.assertFalse(session.submit("status"))
+        release.set()
+        wait_until(lambda: not session.snapshot()["busy"])
+        self.assertTrue(backend.start_called.is_set())
+        self.assertTrue(session.snapshot()["running"])
+        self.assertEqual([event["operation"] for event in session.drain()], ["status", "start"])
+
+    def test_disconnected_status_cancels_queued_start_instead_of_replaying(self):
+        session, backend, release = self.slow_status(connected=False)
+        self.assertTrue(session.submit("start"))
+        release.set()
+        wait_until(lambda: not session.snapshot()["busy"])
+        self.assertFalse(backend.start_called.is_set())
+        events = session.drain()
+        self.assertEqual(events[-1]["operation"], "start")
+        self.assertIn("断开", events[-1]["error"])
+
+    def test_close_during_poll_discards_queued_action_and_cleans_old_owner(self):
+        session, backend, release = self.slow_status()
+        self.assertTrue(session.submit("start"))
+        session.close_async()
+        release.set()
+        wait_until(lambda: backend.closed)
+        self.assertFalse(backend.start_called.is_set())
+        self.assertEqual(backend.stops, 1)
+
     def test_start_failure_stops_any_late_owned_process(self):
         session, backend = self.session()
         def failure():

@@ -73,7 +73,7 @@ class VendorLidarAlgorithm:
             if len(lv)<=1 or len(rv)<=1:
                 raise ValueError("避障检测角内有效雷达点不足")
             if now<self.timestamp:
-                self.phase = "雷达避障：保持厂家转弯动作"
+                self.phase = "雷达避障：保持原转弯动作"
                 return self.command
             lclose,rclose = min(lv)<=self.threshold,min(rv)<=self.threshold
             if not lclose and not rclose:

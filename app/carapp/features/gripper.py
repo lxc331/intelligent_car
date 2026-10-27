@@ -169,7 +169,7 @@ class GripperFeature(Feature):
             b = self._hold_btn(controls, text, vx, wz)
             self.hold_btns.append(b)
 
-        self._btn(controls, "■ 停止", self.stop_all, fg=theme.ERR)
+        self._btn(controls, "■ 停止", self.ctx.stop_all_motion, fg=theme.ERR)
         for text, sy in (("⇤ 平移左转", 1), ("平移右转 ⇥", -1)):
             self.hold_btns.append(self._hold_btn(extras, text, 0, 0, sy=sy))
 
@@ -315,6 +315,8 @@ class GripperFeature(Feature):
 
     def jog(self, sx, sz, *, sy=0):
         """按住方向键：起一条发布线程，直到松开、主动停止或发送失败。"""
+        if not self._motion_available():
+            return
         if self._busy:
             self.ctx.log("序列执行中，先「中止」才能手动移动")
             return
@@ -343,16 +345,20 @@ class GripperFeature(Feature):
         self.ctx.log("车轮：vx=%.2f vy=%.2f m/s，wz=%.2f rad/s" % (vx, vy, wz))
 
     def stop_wheels(self):
+        owned_motion = self.motion_active or self._jog_evt is not None
         if self._jog_evt is not None:
             self._jog_evt.set()
             self._jog_evt = None
         thread = self._motion_thread
         if thread and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=0.3)
-        self.ctx.stop_base()
+        if owned_motion or not self.ctx.motion_in_use(exclude=self):
+            self.ctx.stop_base()
 
     def nudge(self, sx, sz, seconds):
         """点动：走固定时长后自动停，便于精确对位。"""
+        if not self._motion_available():
+            return
         if self._busy:
             self.ctx.log("序列执行中，先「中止」才能手动移动")
             return
@@ -420,6 +426,8 @@ class GripperFeature(Feature):
 
     def run_pick_sequence(self):
         """张爪 → 降臂 → 前进靠近 → 合爪 → 抬臂 → 后退。车轮参与对位。"""
+        if not self._motion_available():
+            return
         if self._busy:
             self.ctx.log("已有动作在执行")
             return
@@ -475,9 +483,13 @@ class GripperFeature(Feature):
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 刷新 ----------
+    def on_background_tick(self, st):
+        if self.tracking:
+            self.tracking.background_tick(st)
+
     def on_tick(self, st):
         if self.tracking:
-            self.tracking.tick(st)
+            self.tracking.tick(st, refresh=False)
         targets = st.get("servo_targets") or {}
         if targets:
             text = "  ".join("%s=%s" % (self.names.get(k, k), v)
@@ -493,7 +505,14 @@ class GripperFeature(Feature):
         self.ctx.log("已停止：车轮归零")
 
     def on_deactivate(self):
-        self.stop_all()
+        if self.motion_active:
+            self.stop_all()
+
+    def _motion_available(self):
+        if self.ctx.motion_in_use(exclude=self):
+            self.ctx.log("其他功能正在占用底盘，请先点击顶部「停止全部」")
+            return False
+        return True
 
     def on_vehicle_change(self):
         self.stop_all()

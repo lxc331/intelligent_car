@@ -142,7 +142,7 @@ class MappingFeature(Feature):
         return None
 
     def connect(self):
-        if self.session and self.session.snapshot()["busy"]:
+        if self.session and self._blocking_operation(self.session.snapshot()):
             return
         self.disconnect()
         car = self.ctx.cfg["car"]
@@ -180,7 +180,13 @@ class MappingFeature(Feature):
             self._notice("请先停止其他底盘或夹取动作。", True)
             return
         state = self.session.snapshot()
-        if not state["connected"] or state["busy"] or self.engaged:
+        if not state["connected"]:
+            self._notice("建图 SSH 未连接，请先点击连接 / 检查。", True)
+            return
+        if self._blocking_operation(state):
+            self._notice("建图操作正在执行，请等待完成。")
+            return
+        if self.engaged:
             return
         if not self.ctx.state.get("cam_connected"):
             self._notice("请等待实时画面就绪，以记录本次建图操作。", True)
@@ -274,6 +280,19 @@ class MappingFeature(Feature):
     def ros_subscriptions(self):
         return {"/map": 1000, "/tf": 100, "/tf_static": 0, "/scan_raw": 100}
 
+    def ros_subscription_types(self):
+        return {"/map": "nav_msgs/msg/OccupancyGrid"}
+
+    def realtime_ros_handlers(self):
+        return {"/scan_raw": self._accept_scan}
+
+    def reset_realtime_ros(self):
+        self._scan_at = 0.
+
+    def _accept_scan(self, msg, received_at):
+        if not self.closed and isinstance(msg, dict) and isinstance(msg.get("ranges"), list) and msg["ranges"]:
+            self._scan_at = received_at
+
     def on_ros_message(self, topic, msg, received_at):
         if self.closed:
             return
@@ -283,8 +302,8 @@ class MappingFeature(Feature):
             self.model.accept_tf(msg, received_at, static=topic == "/tf_static")
         elif topic == "/odom":
             self.model.accept_odom(msg, received_at)
-        elif topic == "/scan_raw" and isinstance(msg.get("ranges"), list) and msg["ranges"]:
-            self._scan_at = received_at
+        elif topic == "/scan_raw":
+            self._accept_scan(msg, received_at)
 
     def on_activate(self):
         self.active = True
@@ -298,7 +317,9 @@ class MappingFeature(Feature):
         self.disconnect()
         self._identity = None
 
-    def on_tick(self, st):
+    def on_background_tick(self, st):
+        if self.closed:
+            return
         car = self.ctx.cfg["car"]
         identity = (car.get("profile_id"), car.get("host"), car.get("transport"))
         if identity != self._identity:
@@ -323,7 +344,19 @@ class MappingFeature(Feature):
             if remote["connected"] and not remote["busy"] and now - self._last_poll > 4:
                 self._last_poll = now
                 self.session.submit("status")
-            controls = "disabled" if remote["busy"] else "normal"
+        self.teleop.on_background_tick(st)
+
+    @staticmethod
+    def _blocking_operation(remote):
+        """Routine status checks do not lock user controls; queued actions do."""
+        return remote.get("busy", False) and remote.get("operation") != "status"
+
+    def on_tick(self, st):
+        if self.closed:
+            return
+        if self.session:
+            remote = self.session.snapshot()
+            controls = "disabled" if self._blocking_operation(remote) else "normal"
             for button in (self.btn_connect, self.btn_start, self.btn_stop, self.btn_save, self.btn_browse):
                 button.config(state=controls)
         else:
@@ -335,6 +368,10 @@ class MappingFeature(Feature):
 
     def _handle_event(self, event):
         operation, result, error = event["operation"], event["result"], event["error"]
+        if operation in ("connect", "status"):
+            # Measure the polling gap from completion, not submission. A slow
+            # query must not immediately schedule another one and starve input.
+            self._last_poll = time.monotonic()
         if operation == "list_directories":
             if self.browser and self.browser.winfo_exists():
                 self.browser.update_listing(result, error)
@@ -367,6 +404,10 @@ class MappingFeature(Feature):
             self._keyframe("地图已保存")
         elif operation == "start":
             self.engaged = True
+            # Retry after SLAM is available as well as pre-subscribing with a
+            # type: the initial request may have predated the /map publisher.
+            self.ctx.bridge.subscribe("/map", throttle_ms=1000,
+                                      message_type=self.ros_subscription_types()["/map"])
             self._notice("建图已启动，等待地图；请低速遥控扫描沙盘。" if result.get("owned") else
                          "已接入车端已有建图，本页面结束操作不会终止外部进程。")
             self._keyframe("开始建图")

@@ -38,6 +38,7 @@ class CameraPanel(tk.Frame):
         self._recording = False
         self._last_size = None
         self._camera_session = None
+        self._frame_camera = None
         self._build()
         ctx.add_frame_listener(self._on_frame)
 
@@ -95,7 +96,7 @@ class CameraPanel(tk.Frame):
         self.ctx.log("切换图像话题：%s" % self.var_topic.get())
 
     def snapshot(self):
-        if not self._last_frame:
+        if not self._last_frame or self._frame_camera is not self.ctx.app.camera:
             self.ctx.log("抓帧失败：还没有画面")
             return
         ts, payload, mode = self._last_frame
@@ -125,6 +126,7 @@ class CameraPanel(tk.Frame):
     def _on_frame(self, ts, payload, mode):
         self._pending = (ts, payload, mode)
         self._last_frame = self._pending
+        self._frame_camera = self.ctx.app.camera
 
     def _fit_box(self):
         """画面区的可用像素（按面板本身算，不看图像标签，避免缩放反馈循环）。"""
@@ -138,7 +140,14 @@ class CameraPanel(tk.Frame):
         return w - 4, max(80, h - 40)   # 40 ≈ 工具条高度
 
     def on_tick(self, st):
+        # Hidden notebook pages keep only the newest payload. Creating a Tk
+        # image or decoding JPEGs here would duplicate the visible page's work.
+        if not self.winfo_ismapped():
+            return
         cam = self.ctx.app.camera
+        if self._frame_camera is not cam:
+            self._pending = None
+            self._last_frame = None
         recording = bool(cam and cam.recording)
         if self._recording != recording:
             self._recording = recording
@@ -150,7 +159,7 @@ class CameraPanel(tk.Frame):
                 if topic:
                     self.var_topic.set(topic)
             self._camera_session = cam
-            self._last_frame = None
+            self._last_frame = self._pending if st.get("cam_connected") else None
             self._imgtk = None
             self._last_size = None
             self.lbl_img.config(image="", text="等待当前车辆的新画面…")

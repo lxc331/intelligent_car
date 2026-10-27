@@ -1,4 +1,4 @@
-"""Mapping controls: focus ownership, connection loss and worker-side limits."""
+"""Mapping controls: continuous holds, focus ownership and connection loss."""
 import copy
 import threading
 import tkinter as tk
@@ -31,53 +31,58 @@ class Context:
 
 
 class MappingGateTests(unittest.TestCase):
-    def test_background_worker_stops_without_gui_ticks(self):
+    def test_worker_continues_past_five_seconds_and_disconnect_still_stops(self):
         ctx = Context()
-        stopped = threading.Event()
+        stopped, continued = threading.Event(), threading.Event()
         ctx.stop_base = lambda: (ctx.sent.append((0., 0., 0.)), stopped.set())
         now = [10.]
-        gate = _MotionGate(ctx, clock=lambda: now[0])
-        controller = TeleopController(gate, autostart=True)
+        publish = ctx.publish_twist
+        def track(vx, wz, quiet=False, *, vy=0.):
+            result = publish(vx, wz, quiet=quiet, vy=vy)
+            if now[0] >= 70.:
+                continued.set()
+            return result
+        ctx.publish_twist = track
+        gate = _MotionGate(ctx)
+        controller = TeleopController(gate, clock=lambda: now[0], autostart=True)
         try:
             gate.allowed.set()
             controller.press("w")
             self.assertGreater(ctx.sent[-1][0], 0.)
-            now[0] = 15.01
+            now[0] = 70.
+            self.assertTrue(continued.wait(.6))
+            self.assertEqual(controller.pressed, {"w"})
+            self.assertGreater(ctx.sent[-1][0], 0.)
+            self.assertFalse(stopped.is_set())
+            ctx.state["ws_connected"] = False
             self.assertTrue(stopped.wait(.6))
             self.assertEqual(ctx.sent[-1], (0., 0., 0.))
-            self.assertTrue(gate.expired)
             self.assertFalse(controller.pressed)
         finally:
             controller.close()
 
-    def test_deadline_runs_in_worker_and_key_repeat_does_not_extend_it(self):
+    def test_six_directions_hold_without_a_time_limit_until_release(self):
         ctx = Context()
         now = [1.]
-        gate = _MotionGate(ctx, clock=lambda: now[0])
+        gate = _MotionGate(ctx)
         controller = TeleopController(gate, clock=lambda: now[0], autostart=False)
         controller.set_speed(.04, .25)
         gate.allowed.set()
-        controller.press("w")
-        self.assertEqual(ctx.sent[-1], (.04, 0., 0.))
-        deadline = gate.deadline
-        for instant in (2., 3., 4., 5., 5.9):
-            now[0] = instant
-            controller.press("w")
-            controller.tick()
-            self.assertEqual(gate.deadline, deadline)
-        now[0] = 6.
-        controller.tick()
-        self.assertEqual(ctx.sent[-1], (0., 0., 0.))
-        self.assertTrue(gate.expired)
-        count = len(ctx.sent)
-        now[0] = 7.
-        controller.press("w")
-        controller.tick()
-        self.assertEqual(len(ctx.sent), count)
-        controller.release("w")
-        controller.press("w")
-        self.assertEqual(ctx.sent[-1], (.04, 0., 0.))
-        controller.close()
+        try:
+            for key in "wsadqe":
+                with self.subTest(key=key):
+                    controller.press(key)
+                    for elapsed in (4.9, 5.1, 30., 120.):
+                        now[0] += elapsed
+                        controller.press(key)
+                        controller.tick()
+                        self.assertEqual(controller.pressed, {key})
+                        self.assertTrue(any(ctx.sent[-1]))
+                    controller.release(key)
+                    self.assertEqual(ctx.sent[-1], (0., 0., 0.))
+                    self.assertFalse(controller.pressed)
+        finally:
+            controller.close()
 
     def test_revoked_permission_stops_next_worker_publication(self):
         ctx = Context()
@@ -134,7 +139,7 @@ class MappingTeleopUITests(unittest.TestCase):
         expected = "建图遥控未就绪：请检查建图连接、地图/定位、雷达与画面，或等待其他动作结束"
         self.assertEqual(self.ctx.logs, [expected])
         for _ in range(4):
-            self.panel.on_tick(self.ctx.state)
+            self.panel.on_background_tick(self.ctx.state)
         self.assertEqual(self.ctx.logs, [expected])
         self.panel.mode.set("keyboard")
         self.panel.change_mode()
@@ -176,6 +181,25 @@ class MappingTeleopUITests(unittest.TestCase):
         self.assertFalse(self.panel.motion_active)
         self.assertFalse(self.panel._armed)
 
+    def test_queued_old_focusout_does_not_cancel_reenabled_keyboard(self):
+        self.root.deiconify()
+        other = tk.Entry(self.root)
+        other.pack()
+        self.arm()
+        self.root.update()
+        self.panel.key_surface.focus_force()
+        self.root.update()
+        self.panel.enable_keyboard()
+        self.root.update()
+        other.focus_set()
+        self.panel.enable_keyboard()
+        self.root.update()
+        self.assertIs(self.root.focus_get(), self.panel.key_surface)
+        self.assertTrue(self.panel._armed)
+        self.panel.key_surface.event_generate('<KeyPress-w>')
+        self.root.update()
+        self.assertTrue(self.panel.motion_active)
+
     def test_mouse_release_and_departure_cancel_motion(self):
         self.assertTrue(self.panel.mouse_press("q"))
         self.assertEqual(self.ctx.sent[-1], (0., .04, 0.))
@@ -192,17 +216,17 @@ class MappingTeleopUITests(unittest.TestCase):
     def test_permission_loss_disconnect_and_recovery_never_resume(self):
         self.panel.mouse_press("w")
         self.permitted = False
-        self.panel.on_tick(self.ctx.state)
+        self.panel.on_background_tick(self.ctx.state)
         self.assertFalse(self.panel.motion_active)
         self.permitted = True
-        self.panel.on_tick(self.ctx.state)
+        self.panel.on_background_tick(self.ctx.state)
         self.assertFalse(self.panel.motion_active)
         self.panel.mouse_press("w")
         self.ctx.state["ws_connected"] = False
-        self.panel.on_tick(self.ctx.state)
+        self.panel.on_background_tick(self.ctx.state)
         self.assertFalse(self.panel.motion_active)
         self.ctx.state["ws_connected"] = True
-        self.panel.on_tick(self.ctx.state)
+        self.panel.on_background_tick(self.ctx.state)
         self.assertFalse(self.panel.motion_active)
 
     def test_permission_loss_and_rearming_do_not_revive_held_keyboard_key(self):
@@ -210,11 +234,11 @@ class MappingTeleopUITests(unittest.TestCase):
         with patch.object(self.root, "focus_get", return_value=self.panel.key_surface):
             self.panel.key_press(self.key("w"))
             self.permitted = False
-            self.panel.on_tick(self.ctx.state)
+            self.panel.on_background_tick(self.ctx.state)
             self.assertFalse(self.panel.motion_active)
             self.assertFalse(self.panel._armed)
             self.permitted = True
-            self.panel.on_tick(self.ctx.state)
+            self.panel.on_background_tick(self.ctx.state)
             self.panel.key_press(self.key("w"))
             self.assertFalse(self.panel.motion_active)
             self.assertTrue(self.panel.enable_keyboard())
@@ -267,11 +291,11 @@ class MappingTeleopUITests(unittest.TestCase):
         self.arm()
         with patch.object(self.root, "focus_get", return_value=self.panel.key_surface):
             self.panel.key_press(self.key("w"))
-            original = self.panel._gate.deadline
+            original = set(self.panel.controller.pressed)
             self.panel.key_release(self.key("w"))
             self.panel.key_press(self.key("w"))
         self.assertTrue(self.panel.motion_active)
-        self.assertEqual(self.panel._gate.deadline, original)
+        self.assertEqual(self.panel.controller.pressed, original)
         self.assertNotIn("w", self.panel._releases)
 
 
