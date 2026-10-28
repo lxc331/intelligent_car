@@ -73,6 +73,7 @@ class NavigationRemote(MappingRemote):
     resume it. Callers must explicitly submit a new navigation goal.
     """
     def __init__(self, *args, **kwargs):
+        self._motion_interlock = kwargs.pop('motion_interlock', None)
         super().__init__(*args, **kwargs)
         self._intent_lock = threading.RLock()
         self._intent_epoch = 0
@@ -108,6 +109,23 @@ class NavigationRemote(MappingRemote):
     def _intent(self):
         with self._intent_lock:
             result = dict(epoch=self._intent_epoch,allow=self._motion_allowed)
+            if self._motion_interlock is not None:
+                try:
+                    interlock = self._motion_interlock()
+                    result['paused'] = bool(interlock.get('enabled') and interlock.get('blocked'))
+                    result['pause_reason'] = str(interlock.get('reason', '红绿灯功能等待通行'))[:200]
+                    enabled = bool(interlock.get('enabled'))
+                    limit = interlock.get('speed_limit') if enabled else None
+                    if limit is not None:
+                        limit = float(limit)
+                        if not math.isfinite(limit) or not 0. < limit <= .15:
+                            raise ValueError('交通场景速度限制无效')
+                    result.update(traffic_enabled=enabled, traffic_speed_limit=limit)
+                except Exception:
+                    # An enabled interlock must not fail open because its
+                    # camera worker or state provider is temporarily unavailable.
+                    result.update(paused=True, pause_reason='红绿灯控制状态读取失败',
+                                  traffic_enabled=True, traffic_speed_limit=None)
             if self._clock_offset is not None:
                 result['expires'] = time.monotonic()+self._clock_offset+2.
             return result

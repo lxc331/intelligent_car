@@ -50,6 +50,11 @@ class AppContext:
         """查询其他功能是否仍占用底盘，包括停止过程中的运动线程。"""
         return any(feature.motion_active for feature in getattr(self.app, "features", ()) if feature is not exclude)
 
+    def motion_interlock(self):
+        """Global temporary hold, also consumed by the vehicle-side navigation lease."""
+        control = getattr(self.app, "traffic_light", None)
+        return control.snapshot() if control else dict(enabled=False, blocked=False, reason="未开启")
+
     def save_dir(self, sub=""):
         base = self.cfg["camera"].get("save_dir", "捕获")
         path = base if os.path.isabs(base) else os.path.join(APP_DIR, base)
@@ -108,15 +113,24 @@ class AppContext:
             return False
         cfg = self.cfg.get("base", {})
         topic = cfg.get("topic", "/controller/cmd_vel")
-        ok = self.bridge.publish(topic, {
-            "linear": {"x": vx, "y": vy, "z": 0.0},
-            "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
-        })
-        if ok:
-            self.state.update(base_cmd=(vx, wz), base_vy=vy)
-            if not quiet and (vx or vy or wz):
-                self.state.update(last_action="底盘 vx=%.2f vy=%.2f wz=%.2f" % (vx, vy, wz))
-        return ok
+        def publish(blocked=False, command=None):
+            x, y, z = (0., 0., 0.) if blocked else command if command is not None else (vx, vy, wz)
+            ok = self.bridge.publish(topic, {
+                "linear": {"x": x, "y": y, "z": 0.0},
+                "angular": {"x": 0.0, "y": 0.0, "z": z},
+            })
+            if ok:
+                self.state.update(base_cmd=(x, z), base_vy=y)
+                if not quiet and (x or y or z):
+                    self.state.update(last_action="底盘 vx=%.2f vy=%.2f wz=%.2f" % (x, y, z))
+            return ok
+        control = getattr(self.app, "traffic_light", None)
+        scene_guard = getattr(control, "guard_twist", None)
+        if scene_guard:
+            return scene_guard(vx, vy, wz, lambda x, y, z: publish(command=(x, y, z)))
+        # Returning the actual zero-send result keeps a paused task alive;
+        # it never reports a failed network send as a successful stop.
+        return control.guard_motion(publish) if control else publish()
 
     def stop_base(self):
         """连续发三次零速；网络断开时无法保证指令送达车辆。"""

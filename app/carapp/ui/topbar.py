@@ -112,6 +112,11 @@ class TopBar(tk.Frame):
                                      activebackground=theme.BORDER, font=theme.FONT_SMALL, padx=10)
         self.btn_stop_all.pack(side="right", padx=(10, 2))
 
+        self.btn_traffic_light = tk.Button(right, text="红绿灯功能：关闭",
+            command=lambda: app.traffic_light.toggle(), bg=theme.PANEL_2, fg=theme.TEXT_DIM,
+            relief="flat", activebackground=theme.BORDER, font=theme.FONT_SMALL, padx=8)
+        self.btn_traffic_light.pack(side="right", padx=2)
+
         self.lbl_conn = _chip(right, "ROS 连接")
         self.lbl_node = _chip(right, "节点数")
         self.lbl_batt = _chip(right, "电池")
@@ -263,12 +268,18 @@ class TopBar(tk.Frame):
 
     # ---------- 刷新 ----------
     def update_state(self, st):
+        traffic = st.get("traffic_light") or {}
+        enabled, blocked = traffic.get("enabled", False), traffic.get("blocked", False)
+        self.btn_traffic_light.config(
+            text="红绿灯功能：" + (traffic.get("reason", "等待画面") if enabled else "关闭"),
+            fg=theme.WARN if enabled and (blocked or traffic.get("speed_limit") is not None) else theme.OK if enabled else theme.TEXT_DIM,
+            relief="sunken" if enabled else "flat")
         navigation = st.get("navigation_running", False)
-        self.lbl_navigation.config(text="前往目标中" if navigation else "未行驶",
-                                   fg=theme.OK if navigation else theme.TEXT_DIM)
+        self.lbl_navigation.config(text="红绿灯暂停" if navigation and enabled and blocked else "前往目标中" if navigation else "未行驶",
+                                   fg=theme.WARN if navigation and enabled and blocked else theme.OK if navigation else theme.TEXT_DIM)
         running, waiting = st.get("cruise_running"), st.get("cruise_waiting")
-        self.lbl_cruise.config(text="等待雷达，自动恢复" if running and waiting else "运行中（支持后台）" if running else "已停止",
-                               fg=theme.WARN if running and waiting else theme.OK if running else theme.TEXT_DIM)
+        self.lbl_cruise.config(text="红绿灯暂停，自动恢复" if running and enabled and blocked else "等待雷达，自动恢复" if running and waiting else "运行中（支持后台）" if running else "已停止",
+                               fg=theme.WARN if running and (waiting or enabled and blocked) else theme.OK if running else theme.TEXT_DIM)
         if st["ws_connected"]:
             self.lbl_conn.config(text="● 已连接", fg=theme.OK)
         else:

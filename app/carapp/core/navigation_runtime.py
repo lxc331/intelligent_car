@@ -72,6 +72,9 @@ class NavigationRuntime:
         self.command = None
         self.command_at = 0.
         self.last_sent = False
+        self._traffic_paused = False
+        self._resume_target = None
+        self._navigation_accept_pending = False
         self.detail = '导航服务启动中；请标记小车初始位置与朝向'
         self.pending = {}
         self.quitting = False
@@ -200,7 +203,8 @@ class NavigationRuntime:
         atomic(self.root / 'state.json', dict(connected=True, running=running, owned=running,
                ready=ready, localized=self._localized(), pose=pose, goal_state=self.goal_state,
                motion_stopped=not (self.goal_handle or self.last_sent or
-                                   self.goal_state in ('accepted','navigating','canceling')),
+                                   self.goal_state in ('accepted','navigating','canceling','paused')),
+               motion_active=self.goal_state in ('accepted','navigating','canceling','paused'),
                path=self.path, distance_remaining=self.distance_remaining,
                detail=self.detail, temporary_paths=[str(self.root / name) for name in
                  ('owner.json','lease.json','intent.lock','runtime.py','config_builder.py',
@@ -213,6 +217,8 @@ class NavigationRuntime:
         self.last_sent = False
 
     def _revoke(self, reason='导航已取消'):
+        self._resume_target = None
+        self._traffic_paused = False
         self.revoked_epoch = max(self.revoked_epoch, self.goal_epoch)
         if self.goal_handle:
             try:
@@ -220,16 +226,67 @@ class NavigationRuntime:
                     self.cancel_future = self.goal_handle.cancel_goal_async()
             except Exception:
                 pass
-        if self.goal_state in ('accepted','navigating','planning'):
+        if self.goal_state in ('accepted','navigating','planning','paused'):
             self.goal_state = 'canceling' if self.goal_handle else 'canceled'
         self.command = None
         if self.last_sent or self.goal_handle:
             self._zero()
         self.detail = reason
 
+    def _lease_grants_goal(self, now):
+        return bool(self.goal_epoch > self.revoked_epoch and self.lease.get('allow') and
+                    int(self.lease.get('epoch', -1)) == self.goal_epoch and
+                    now <= self.lease.get('expires', 0.))
+
+    def _traffic_holds(self):
+        return bool(self.lease.get('paused') and self.lease.get('traffic_enabled', True))
+
+    def _pause_for_traffic(self):
+        """Stop the relay and suspend Nav2 so its progress timer cannot expire.
+
+        Retain only this goal's target and authorization epoch. Explicit stop,
+        stale lease, failed localization or shutdown clears the retained target.
+        """
+        self._traffic_paused = True
+        self.goal_state = 'paused'
+        self.command = None
+        self._zero()
+        self.detail = self.lease.get('pause_reason') or '正前方红灯，导航等待通行'
+        if self.goal_handle and self.cancel_future is None:
+            try:
+                self.cancel_future = self.goal_handle.cancel_goal_async()
+            except Exception:
+                self._revoke('暂停导航失败，已取消；需重新点击开始')
+
+    def _resume_after_traffic(self, now):
+        if not getattr(self, '_traffic_paused', False):
+            return
+        if getattr(self, 'quitting', False) or not self._lease_grants_goal(now) or not self._ready():
+            self._revoke('等待红灯期间控制租约、定位或传感器失效，已取消导航')
+            return
+        if self._traffic_holds():
+            return
+        if self.goal_handle or getattr(self, '_navigation_accept_pending', False):
+            return
+        target = self._resume_target
+        if target is None:
+            self._revoke('暂停目标已失效，请重新点击开始导航')
+            return
+        self._traffic_paused = False
+        try:
+            self._navigate(dict(epoch=self.goal_epoch, internal_resume=True), target)
+        except Exception:
+            self._revoke('恢复导航失败，已取消；需重新点击开始')
+
     def _drive(self):
         from geometry_msgs.msg import Twist
         now = time.monotonic()
+        if self.goal_state in ('accepted','navigating','paused') and self._traffic_holds():
+            if self._lease_grants_goal(now) and self._ready():
+                self._pause_for_traffic()
+            else:
+                self._revoke('控制租约、定位或传感器失效，导航已停止；需重新点击开始')
+            return
         allowed = (self.goal_state == 'navigating' and self.goal_handle and
                    self.goal_epoch > self.revoked_epoch and self.lease.get('allow') and
                    int(self.lease.get('epoch',-1)) == self.goal_epoch and
@@ -237,10 +294,23 @@ class NavigationRuntime:
         if self.goal_state == 'navigating' and not allowed:
             self._revoke('控制租约、定位或传感器失效，导航已停止；需重新点击开始')
         if allowed and self.command is not None and now - self.command_at < .35:
+            command = self.command
+            limit = self.lease.get('traffic_speed_limit') if self.lease.get('traffic_enabled') else None
+            if limit is not None:
+                try:
+                    limit = float(limit)
+                    if not math.isfinite(limit) or not 0. < limit <= .15:
+                        raise ValueError('交通场景速度限制无效')
+                except (ValueError, TypeError):
+                    self._revoke('交通场景速度限制无效，导航已停止')
+                    return
+                speed = math.hypot(command[0], command[1])
+                ratio = min(1., limit / speed) if speed else 1.
+                command = tuple(value * ratio for value in command)
             message = Twist()
-            message.linear.x, message.linear.y, message.angular.z = self.command
+            message.linear.x, message.linear.y, message.angular.z = command
             self.base.publish(message)
-            self.last_sent = any(self.command)
+            self.last_sent = any(command)
         elif self.last_sent:
             self._zero()
 
@@ -252,7 +322,7 @@ class NavigationRuntime:
                 self.lease = lease
         except (OSError, ValueError, KeyError):
             self._revoke('导航控制租约无效')
-        if self.goal_state in ('accepted','navigating') and (
+        if self.goal_state in ('accepted','navigating','paused') and (
                 int(self.lease.get('epoch',-1)) > self.goal_epoch or
                 not self.lease.get('allow') or now > self.lease.get('expires',0.)):
             self._revoke()
@@ -261,6 +331,7 @@ class NavigationRuntime:
         if self.launch and self.launch.poll() is not None:
             self._revoke('Nav2 进程已退出')
             self.quitting = True
+        self._resume_after_traffic(now)
         for path in sorted(self.root.glob('*.request.json'))[:8]:
             try:
                 request = json.loads(path.read_text())
@@ -282,6 +353,8 @@ class NavigationRuntime:
             self.launch_log.truncate()
 
     def _reply(self, request, result=None, error=None):
+        if request.get('internal_resume'):
+            return
         atomic(self.root / (request['request_id'] + '.reply.json'),
                dict(result=result or {}, error=error))
 
@@ -398,12 +471,15 @@ class NavigationRuntime:
         goal.pose = self._stamped(*target)
         epoch = int(request['epoch'])
         self.goal_epoch = epoch
+        self._resume_target = target
+        self._navigation_accept_pending = True
         self.goal_state = 'accepted'
         self.command = None
         future = self.navigator.send_goal_async(goal, feedback_callback=self._feedback)
         def accepted(done):
             try:
                 handle = done.result()
+                self._navigation_accept_pending = False
                 if not handle.accepted:
                     raise RuntimeError('Nav2拒绝导航目标')
                 self.goal_handle = handle
@@ -414,18 +490,37 @@ class NavigationRuntime:
                 else:
                     self.goal_state = 'navigating'
                     self.detail = '正在导航；动态障碍出现时 Nav2 将重新规划'
-                    self._reply(request, dict(running=True, accepted=True, goal_state='navigating'))
+                    if self._traffic_holds() or self._traffic_paused:
+                        self._pause_for_traffic()
+                    self._reply(request, dict(running=True, accepted=True, goal_state=self.goal_state))
                 def finished(result):
                     if self.goal_epoch != epoch or self.goal_handle is not handle:
                         return
                     try:
                         code = result.result().status
+                    except Exception:
+                        code = None
+                    if (code == 5 and getattr(self, '_traffic_paused', False) and self._resume_target is not None
+                            and self._lease_grants_goal(time.monotonic())):
+                        # This was our deliberate red-light cancellation, not
+                        # completion of the user's navigation intent.
+                        self.goal_handle = None
+                        self.cancel_future = None
+                        self.command = None
+                        self.goal_state = 'paused'
+                        self._zero()
+                        return
+                    try:
+                        if code is None:
+                            raise RuntimeError('导航结果读取失败')
                         self.goal_state = {4:'succeeded',5:'canceled',6:'aborted'}.get(code,'error')
                         self.detail = {'succeeded':'已到达目标点','canceled':'导航已取消',
                                        'aborted':'导航失败，请检查通路或定位'}.get(self.goal_state,'导航异常结束')
                     except Exception:
                         self.goal_state, self.detail = 'error', '导航结果读取失败'
                     self.revoked_epoch = max(self.revoked_epoch,epoch)
+                    self._resume_target = None
+                    self._traffic_paused = False
                     self.goal_handle = None
                     self.cancel_future = None
                     self.command = None
@@ -433,6 +528,7 @@ class NavigationRuntime:
                         self._zero()
                 handle.get_result_async().add_done_callback(finished)
             except Exception as exc:
+                self._navigation_accept_pending = False
                 self.goal_state = 'error'
                 self._revoke(str(exc))
                 self._reply(request,error=str(exc))

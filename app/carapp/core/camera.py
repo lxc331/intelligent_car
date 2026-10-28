@@ -51,7 +51,8 @@ def parse_size(payload, mode):
 
 class CameraStream(threading.Thread):
     RETRY_SECONDS = 3
-    def __init__(self, host, http_port, topic, mode, frame_q, log=None, connection_guard=None):
+    def __init__(self, host, http_port, topic, mode, frame_q, log=None, connection_guard=None,
+                 frame_handler=None):
         super().__init__(daemon=True, name="camera")
         self.host = host
         self.http_port = http_port
@@ -60,6 +61,7 @@ class CameraStream(threading.Thread):
         self.frame_q = frame_q
         self.log = log or (lambda text: None)
         self.connection_guard = connection_guard
+        self.frame_handler = frame_handler
 
         self.url = "http://%s:%d/stream?topic=%s&type=%s" % (
             host, http_port, topic, "mjpeg" if mode == "jpeg" else "png")
@@ -210,6 +212,8 @@ class CameraStream(threading.Thread):
         self.connected = True
         self.last_error = None
         self.last_frame_at = time.monotonic()
+        if self.frame_handler:
+            self.frame_handler(self.last_frame_at, payload, self.mode)
         self.frames += 1
         self.bytes += len(payload)
         if self.size is None:

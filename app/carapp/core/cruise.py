@@ -134,6 +134,11 @@ class CruiseRunner:
                 decision = (0.,0.,"ROS 连接中断，已取消巡航",True)
             elif not self.ctx.state.get("cam_connected"):
                 decision = (0.,0.,"实时画面中断，已取消巡航",True)
+            elif getattr(self.ctx, "motion_interlock", lambda: {})().get("blocked"):
+                # Restart PID/turn timing from live lidar after the light clears;
+                # time spent parked must not advance an old avoidance maneuver.
+                self.policy.wait_for_scan()
+                decision = (0.,0.,"红绿灯暂停，连续未见红灯后自动继续",False)
             else:
                 scan = self.monitor.snapshot()
                 decision = self.policy.decide(scan,self.settings,self.clock())

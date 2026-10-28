@@ -27,6 +27,7 @@ from carapp.core.connection import diagnose, require_wifi, search_prefixes  # no
 from carapp.core.connection_profiles import plan_connection, apply_connection  # noqa: E402
 from carapp.features import FEATURES  # noqa: E402
 from carapp.features.base import AppContext  # noqa: E402
+from carapp.features.traffic_light import TrafficLightControl  # noqa: E402
 from carapp.model.state import CarState  # noqa: E402
 from carapp.ui import theme  # noqa: E402
 from carapp.ui.focus import window_has_focus  # noqa: E402
@@ -71,6 +72,8 @@ class App:
         self._active_feature = None
         self._had_window_focus = False
         self._focus_timer = None
+
+        self.traffic_light = TrafficLightControl(self.ctx)
 
         self._build_ui()
         self.root.bind("<FocusIn>", self._window_focus_in, add="+")
@@ -259,10 +262,14 @@ class App:
         mode = "jpeg" if HAS_PIL else "png"
         self.camera = CameraStream(car["host"], int(car["http_port"]), topic, mode,
                                    self.cam_q, log=self.log,
-                                   connection_guard=self._connection_guard())
+                                   connection_guard=self._connection_guard(),
+                                   frame_handler=self.traffic_light.frame_handler())
         self.camera.start()
 
     def stop_camera(self):
+        control = getattr(self, "traffic_light", None)
+        if control:
+            control.reset()
         if self.camera:
             self.camera.stop_record()
             self.camera.stop()
@@ -463,6 +470,7 @@ class App:
         try:
             for feat in self.features:
                 feat.on_close()
+            self.traffic_light.close()
             self.stop_camera()
             if self.bridge:
                 self.bridge.stop()

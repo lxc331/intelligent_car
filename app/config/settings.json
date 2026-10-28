@@ -8,7 +8,7 @@
       "192.168.150",
       "192.168.149"
     ],
-    "profile_id": "HW-A0857935",
+    "profile_id": "HW-10CCA58E",
     "transport": "sta",
     "sta_ssid": "xiaomi"
   },
@@ -19,7 +19,7 @@
       "id": "HW-10CCA58E",
       "wifi_host": "192.168.149.1",
       "ssid": "HW-10CCA58E",
-      "sta_host": "10.42.0.135",
+      "sta_host": "192.168.167.136",
       "sta_ssid": "xiaomi"
     },
     {
@@ -28,7 +28,7 @@
       "id": "HW-A0857935",
       "wifi_host": "192.168.149.1",
       "ssid": "HW-A0857935",
-      "sta_host": "192.168.167.136",
+      "sta_host": "192.168.167.118",
       "sta_ssid": "xiaomi"
     }
   ],

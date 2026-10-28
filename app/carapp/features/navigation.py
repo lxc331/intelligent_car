@@ -193,7 +193,8 @@ class NavigationFeature(Feature):
         try:
             remote = NavigationRemote(car["host"], self.username.get().strip(), self.password.get(),
                 port=int(self.ctx.cfg.get("terminal", {}).get("port", 22)), profile_id=car.get("profile_id", ""),
-                known_hosts=os.path.join(APP_DIR, "config", "ssh_known_hosts"), connection_guard=guard)
+                known_hosts=os.path.join(APP_DIR, "config", "ssh_known_hosts"), connection_guard=guard,
+                motion_interlock=getattr(self.ctx, "motion_interlock", None))
             self.session = NavigationSession(remote)
             self.session.submit("connect")
             self._notice("正在检查车端 Nav2、定位和传感器…")

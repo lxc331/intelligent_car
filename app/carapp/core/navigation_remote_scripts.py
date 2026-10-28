@@ -33,7 +33,13 @@ def lease(allow=False):
   if epoch>=int(previous.get('epoch',-1)):
    now=time.monotonic(); expires=float(p.get('expires',now+2.))
    if not math.isfinite(expires): raise ValueError('Invalid lease deadline')
-   atomic(root/'lease.json',dict(epoch=epoch,allow=bool(allow),at=now,expires=min(now+2.,expires)))
+   traffic=bool(p.get('traffic_enabled',p.get('paused',False))); speed_limit=p.get('traffic_speed_limit') if traffic else None
+   if speed_limit is not None:
+    speed_limit=float(speed_limit)
+    if not math.isfinite(speed_limit) or not 0.<speed_limit<=.15: raise ValueError('Invalid traffic speed limit')
+   atomic(root/'lease.json',dict(epoch=epoch,allow=bool(allow),at=now,expires=min(now+2.,expires),
+          paused=bool(p.get('paused')) and traffic,pause_reason=str(p.get('pause_reason',''))[:200],
+          traffic_enabled=traffic,traffic_speed_limit=speed_limit))
 
 def source_env():
  found=False
