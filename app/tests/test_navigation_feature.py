@@ -1,5 +1,6 @@
 """Navigation page integration without SSH, camera recording or vehicle motion."""
 import copy
+import math
 from pathlib import Path
 import time
 import tkinter as tk
@@ -225,6 +226,63 @@ class NavigationFeatureTests(unittest.TestCase):
             self.feature._handle_event(event)
             self.assertFalse(self.feature.engaged)
             self.assertFalse(self.session.calls)
+
+
+    def test_road_route_preview_uses_network_nodes_without_network_or_car(self):
+        self.feature.import_road_network(self._network_file())
+        self.assertIsNotNone(self.feature.network)
+        with patch("carapp.features.navigation.valid_target", return_value=True):
+            self.feature.select_pose("start", .25, .25, 0.)
+            self.feature.select_pose("goal", .75, .75, 0.)
+        self.assertEqual(self.feature.route, (0, 1, 2))
+        self.assertGreater(len(self.feature.map_panel.plan), 2)
+        self.assertEqual(self.feature.map_panel.route, (0, 1, 2))
+        self.assertIn("路网路径：0 → 1 → 2", self.feature._status_text)
+        self.assertAlmostEqual(self.feature.goal[0], .75)
+        self.assertAlmostEqual(self.feature.goal[1], .75)
+        self.assertAlmostEqual(self.feature.goal[2], math.pi / 2)
+
+    def test_road_click_far_from_a_node_is_rejected(self):
+        self.feature.goal = None
+        self.feature.import_road_network(self._network_file())
+        with patch("carapp.features.navigation.valid_target", return_value=True):
+            self.feature.select_pose("goal", .1, .9, 0.)
+        self.assertIsNone(self.feature.goal)
+        self.assertIsNone(self.feature.goal_node)
+        self.assertIn("离最近节点", self.feature._status_text)
+
+    def test_unreachable_route_reports_and_clears_preview(self):
+        self.feature.import_road_network(self._network_file())
+        with patch("carapp.features.navigation.valid_target", return_value=True):
+            self.feature.select_pose("start", .75, .75, 0.)
+            self.feature.select_pose("goal", .25, .25, 0.)
+        self.assertFalse(self.feature.route)
+        self.assertFalse(self.feature.map_panel.plan)
+        self.assertIn("路网推演失败", self.feature._status_text)
+
+    def test_plan_with_road_route_requests_preview_from_the_start_node(self):
+        self.feature.import_road_network(self._network_file())
+        with patch("carapp.features.navigation.valid_target", return_value=True):
+            self.feature.select_pose("start", .25, .25, 0.)
+            self.feature.select_pose("goal", .75, .75, 0.)
+        self.assertTrue(self.feature.plan())
+        args, kwargs = self.session.calls[-1]
+        self.assertEqual(args[0], "plan")
+        self.assertEqual(kwargs["start"], (.25, .25, 0.))
+        self.feature.route = ()
+        self.assertTrue(self.feature.plan())
+        self.assertNotIn("start", self.session.calls[-1][1])
+
+    def _network_file(self):
+        import tempfile
+        document = ("waypoints:\n"
+                    "  - id: 0\n    pose: [0.25, 0.25, 0.0]\n    to: [1]\n"
+                    "  - id: 1\n    pose: [0.75, 0.25]\n    to: [2]\n"
+                    "  - id: 2\n    pose: [0.75, 0.75]\n    to: [1]\n")
+        directory = tempfile.mkdtemp(prefix="road-feature-")
+        path = Path(directory) / "road_network.yaml"
+        path.write_text(document, encoding="utf-8")
+        return path
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from carapp.core.map_data import MapModel
 from carapp.core.navigation_map import load_navigation_map, valid_target
+from carapp.core.road_network import parse_road_network
 from carapp.ui.navigation_map import NavigationMapPanel
 
 
@@ -198,6 +199,24 @@ class NavigationMapUITests(unittest.TestCase):
         self.panel.on_tick()
         self.assertFalse(self.panel.canvas.find_withtag("nav_path"))
         self.assertFalse(self.panel.canvas.find_withtag("nav_goal"))
+
+    def test_road_network_overlay_route_and_start_marker_render_on_tick(self):
+        network = parse_road_network("waypoints:\n"
+            "  - id: 0\n    pose: [2.1, 3.15, 0.0]\n    to: [1]\n"
+            "  - id: 1\n    pose: [2.4, 3.15]\n    to: []\n")
+        self.panel.set_network(network)
+        self.panel.set_start((2.1, 3.15, 0.), 0)
+        self.panel.set_route((0, 1))
+        self.panel.set_plan(network.dense_path((0, 1)))
+        self.assertFalse(self.panel.canvas.find_withtag("nav_network"))
+        self.panel.on_tick()
+        self.assertTrue(self.panel.canvas.find_withtag("nav_network"))
+        self.assertTrue(self.panel.canvas.find_withtag("nav_start"))
+        self.assertTrue(self.panel.canvas.find_withtag("nav_path"))
+        self.panel.set_network(None)
+        self.panel.on_tick()
+        self.assertFalse(self.panel.canvas.find_withtag("nav_network"))
+        self.assertFalse(self.panel.canvas.find_withtag("nav_start"))
 
     def test_replacing_model_clears_same_revision_raster_and_partial_selection(self):
         self.panel._select_start(types.SimpleNamespace(x=3, y=4))

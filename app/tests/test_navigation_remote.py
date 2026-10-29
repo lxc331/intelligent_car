@@ -96,6 +96,21 @@ class NavigationValidationTests(unittest.TestCase):
         self.assertIn('os.getpgid(pid)!=pid',REMOTE_SCRIPT)
 
 
+    def test_plan_start_preview_sends_both_poses_and_grants_no_motion(self):
+        remote = FakeRemote()
+        remote.plan(.5, .5, 0., start=(-.5, -.5, 1.57))
+        operation, values = remote.operations[-1]
+        self.assertEqual(operation, 'plan')
+        self.assertEqual(values['values'], dict(x=.5, y=.5, yaw=0.,
+            start=dict(x=-.5, y=-.5, yaw=1.57)))
+        self.assertFalse(any(name in values for name in ('allow', 'epochs', 'values_allowed')))
+        remote.plan(.5, .5, 0.)
+        self.assertNotIn('start', remote.operations[-1][1]['values'])
+        for start in ((math.nan, 0., 0.), (-.5, -.5)):
+            with self.assertRaises(ValueError):
+                remote.plan(.5, .5, 0., start=start)
+
+
 class NavigationParameterTests(unittest.TestCase):
     def test_vendor_configuration_copied_and_safe_overrides_applied(self):
         vendor = {'planner_server':{'ros__parameters':{'legacy':True}},
