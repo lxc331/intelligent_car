@@ -9,9 +9,9 @@ import time
 
 
 _TERMINAL_GOALS = frozenset(("succeeded", "canceled", "cancelled", "aborted",
-                             "failed", "rejected", "stopped", "idle", "error"))
+                             "failed", "rejected", "stopped", "idle", "error", "blocked"))
 _OPERATIONS = frozenset(("connect", "start", "status", "initial_pose", "plan", "navigate",
-                         "cancel", "stop"))
+                         "cancel", "stop", "follow_path"))
 
 
 class NavigationSession:
@@ -59,11 +59,11 @@ class NavigationSession:
                 return False
             if operation == "initial_pose" and not self._state["running"]:
                 return False
-            if operation in ("plan", "navigate") and not self._state["ready"]:
+            if operation in ("plan", "navigate", "follow_path") and not self._state["ready"]:
                 return False
-            if operation in ("plan", "initial_pose", "navigate") and self._state["motion_active"]:
+            if operation in ("plan", "initial_pose", "navigate", "follow_path") and self._state["motion_active"]:
                 return False
-            if operation == "navigate":
+            if operation in ("navigate", "follow_path"):
                 # Bind acceptance to the adapter epoch before starting a
                 # worker; cancellation can otherwise overtake method entry.
                 capture = getattr(self.remote, "capture_intent", None)
@@ -76,10 +76,10 @@ class NavigationSession:
                 self._pending = request
                 self._state["operation"] = operation
             else:
-                if operation == "navigate":
+                if operation in ("navigate", "follow_path"):
                     self._state.update(motion_active=True, goal_state="pending")
                 self._start_locked(request)
-            if operation == "navigate":
+            if operation in ("navigate", "follow_path"):
                 # Occupy motion before this explicit request can reach a worker.
                 self._state.update(motion_active=True, goal_state="pending")
             return True
@@ -142,7 +142,7 @@ class NavigationSession:
             self._state.update(running=result.get("running", False), ready=False)
         if "goal_state" in result:
             self._state["goal_state"] = result["goal_state"]
-        waiting_navigation = self._pending and self._pending[0] == "navigate"
+        waiting_navigation = self._pending and self._pending[0] in ("navigate", "follow_path")
         # A disconnected adapter can revoke its local grant but cannot claim a
         # vehicle-side stop acknowledgement. Keep existing motion reserved.
         stop_confirmed = result.get("motion_stopped") is True
@@ -154,7 +154,7 @@ class NavigationSession:
                 self._state["motion_active"] = False
             elif "motion_active" in result:
                 self._state["motion_active"] = bool(result["motion_active"])
-            elif operation == "navigate":
+            elif operation in ("navigate", "follow_path"):
                 self._state["motion_active"] = self._state["goal_state"] not in _TERMINAL_GOALS
             elif operation in ("cancel", "stop") or self._state["goal_state"] in _TERMINAL_GOALS:
                 self._state["motion_active"] = False
@@ -195,7 +195,7 @@ class NavigationSession:
                     self._drop_pending_locked("导航连接或操作失败，请重新确认后再操作")
             self.events.put(dict(operation=operation, result=getattr(exc, "partial", {}),
                                  error=str(exc), stale=stale, target=self._target(operation, args)))
-            if operation in ("start", "navigate", "status"):
+            if operation in ("start", "navigate", "follow_path", "status"):
                 # Revoke an uncertain action even when its response was lost.
                 try:
                     self.remote.request_cancel()

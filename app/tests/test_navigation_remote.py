@@ -149,7 +149,7 @@ class NavigationRemoteTests(unittest.TestCase):
         import base64
         self.assertTrue(all(len(base64.b64decode(value['chunk'])) <= 32768 for value in uploads))
         start = next(value for operation,value in remote.operations if operation=='start')
-        self.assertEqual(set(start['files']),{'map.yaml','map.pgm','runtime.py','config_builder.py','navigation.launch.py'})
+        self.assertEqual(set(start['files']),{'map.yaml','map.pgm','runtime.py','road_runtime.py','config_builder.py','navigation.launch.py'})
         self.assertTrue(all(len(value['sha256'])==64 for value in start['files'].values()))
         with self.assertRaises(NavigationRemoteError):
             remote.start(MAP)

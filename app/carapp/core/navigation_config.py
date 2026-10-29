@@ -86,6 +86,9 @@ def generate_launch_description():
         ('nav2_bt_navigator','bt_navigator','bt_navigator',[]),
         ('nav2_velocity_smoother','velocity_smoother','velocity_smoother',
           [('cmd_vel',raw),('cmd_vel_smoothed',smooth)])]
+ if os.path.isfile(root+'/keepout.yaml'):
+  specs[0:0]=[('nav2_map_server','map_server','sandbox_mask_server',[]),
+              ('nav2_map_server','costmap_filter_info_server','sandbox_filter_info_server',[])]
  nodes=[Node(package=package,executable=executable,name=name,
              parameters=[config],remappings=remaps,
              arguments=['--ros-args','--log-level','warn','--disable-external-lib-logs'],

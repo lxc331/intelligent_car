@@ -26,14 +26,21 @@ def yaw_of(q):
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
 
-class NavigationRuntime:
+try:
+    from road_runtime import RoadRuntime
+except ModuleNotFoundError:
+    from carapp.core.sandbox_runtime import RoadRuntime
+
+
+class NavigationRuntime(RoadRuntime):
     def __init__(self, root, token, speed, vendor_dir):
         import rclpy
         from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
         from sensor_msgs.msg import LaserScan
         from nav_msgs.msg import Odometry, Path as RosPath
         from lifecycle_msgs.srv import GetState
-        from nav2_msgs.action import ComputePathToPose, NavigateToPose
+        from nav2_msgs.action import ComputePathToPose, NavigateToPose, FollowPath
+        from nav2_msgs.srv import GetCostmap
         from rclpy.action import ActionClient
         from rclpy.qos import qos_profile_sensor_data
         from tf2_ros import Buffer, TransformListener
@@ -51,8 +58,14 @@ class NavigationRuntime:
         self.node.create_subscription(RosPath, '/plan', self._path, 10)
         self.planner = ActionClient(self.node, ComputePathToPose, '/compute_path_to_pose')
         self.navigator = ActionClient(self.node, NavigateToPose, '/navigate_to_pose')
+        self.follower = ActionClient(self.node, FollowPath, '/follow_path')
+        self.costmap_client = self.node.create_client(GetCostmap, '/global_costmap/get_costmap')
+        self._resume_path = None
+        self.route_id=None;self.blocked_at=None
         self.lifecycle_names = ('map_server', 'amcl', 'controller_server', 'planner_server',
                                 'smoother_server', 'behavior_server', 'bt_navigator', 'velocity_smoother')
+        if (root/'keepout.yaml').exists():
+            self.lifecycle_names += ('sandbox_mask_server','sandbox_filter_info_server')
         self.lifecycle = {name: self.node.create_client(GetState, '/' + name + '/get_state')
                           for name in self.lifecycle_names}
         self.lifecycle_state, self.lifecycle_futures = {}, {}
@@ -92,6 +105,9 @@ class NavigationRuntime:
         vendor = yaml.safe_load(Path(vendor_dir, 'nav2_params.yaml').read_text())
         controller = yaml.safe_load(Path(vendor_dir, 'nav2_controller_dwb.yaml').read_text())
         params = navigation_parameters(vendor, controller, str(self.root / 'map.yaml'), self.speed)
+        if (self.root/'keepout.yaml').exists():
+            from road_config import road_parameters
+            road_parameters(params,str(self.root),self.speed)
         # The dimensions were measured at the laser, while Nav2 expects a base
         # frame footprint. Transform all four corners using the actual car TF.
         until = time.monotonic() + 6.
@@ -113,6 +129,7 @@ class NavigationRuntime:
                    for x, y in ((.24,.105),(.24,-.105),(-.11,-.105),(-.11,.105))]
         for name in ('local_costmap', 'global_costmap'):
             params[name][name]['ros__parameters']['footprint'] = str([list(p) for p in corners])
+        self.path_footprint=(max(x for x,y in corners)+.01,-min(x for x,y in corners)+.01,max(abs(y) for x,y in corners)+.01)
         (self.root / 'nav2.yaml').write_text(yaml.safe_dump(params, sort_keys=False))
         self.launch_log = (self.root / 'nav2.log').open('w+b', buffering=0)
         self.launch = subprocess.Popen(['ros2', 'launch', str(self.root / 'navigation.launch.py')],
@@ -135,6 +152,7 @@ class NavigationRuntime:
         self.amcl_at = time.monotonic()
 
     def _path(self, message):
+        if getattr(self,'_resume_path',None):return
         if message.header.frame_id != 'map':
             return
         points = [(p.pose.position.x, p.pose.position.y, yaw_of(p.pose.orientation)) for p in message.poses]
@@ -206,6 +224,7 @@ class NavigationRuntime:
                                    self.goal_state in ('accepted','navigating','canceling','paused')),
                motion_active=self.goal_state in ('accepted','navigating','canceling','paused'),
                path=self.path, distance_remaining=self.distance_remaining,
+               route_id=getattr(self,'route_id',None),blocked_at=getattr(self,'blocked_at',None),
                detail=self.detail, temporary_paths=[str(self.root / name) for name in
                  ('owner.json','lease.json','intent.lock','runtime.py','config_builder.py',
                   'navigation.launch.py','map.yaml','map.pgm','nav2.yaml','state.json',
@@ -217,6 +236,7 @@ class NavigationRuntime:
         self.last_sent = False
 
     def _revoke(self, reason='导航已取消'):
+        self._resume_path = None
         self._resume_target = None
         self._traffic_paused = False
         self.revoked_epoch = max(self.revoked_epoch, self.goal_epoch)
@@ -226,7 +246,7 @@ class NavigationRuntime:
                     self.cancel_future = self.goal_handle.cancel_goal_async()
             except Exception:
                 pass
-        if self.goal_state in ('accepted','navigating','planning','paused'):
+        if self.goal_state in ('accepted','navigating','planning','paused','checking_blockage'):
             self.goal_state = 'canceling' if self.goal_handle else 'canceled'
         self.command = None
         if self.last_sent or self.goal_handle:
@@ -274,7 +294,11 @@ class NavigationRuntime:
             return
         self._traffic_paused = False
         try:
-            self._navigate(dict(epoch=self.goal_epoch, internal_resume=True), target)
+            path=getattr(self,'_resume_path',None)
+            if path:
+                pose=self._pose(); index=min(range(len(path)),key=lambda i:math.dist(pose[:2],path[i][:2]))
+                self._check_road(dict(epoch=self.goal_epoch,internal_resume=True),[pose]+list(path[index:]))
+            else:self._navigate(dict(epoch=self.goal_epoch, internal_resume=True), target)
         except Exception:
             self._revoke('恢复导航失败，已取消；需重新点击开始')
 
@@ -316,6 +340,8 @@ class NavigationRuntime:
 
     def _maintain(self):
         now = time.monotonic()
+        if self.goal_state=='checking_blockage' and now>getattr(self,'_blockage_deadline',0.):
+            self.goal_state='aborted';self.detail='道路检查超时，已停车；请重新规划'
         try:
             lease = json.loads((self.root / 'lease.json').read_text())
             if int(lease['epoch']) >= int(self.lease['epoch']):
@@ -394,6 +420,18 @@ class NavigationRuntime:
             return
         if operation in ('plan','navigate') and self.goal_handle:
             raise RuntimeError('请先等待当前导航结束或取消')
+        if operation=='follow_path':
+            import hashlib,re
+            if self.goal_handle or self._navigation_accept_pending:raise RuntimeError('当前导航尚未结束')
+            name=values['path_file']
+            if not re.fullmatch(r'route_[a-f0-9]{32}\.json',name):raise ValueError('路径文件名无效')
+            path=self.root/name
+            if path.is_symlink() or path.stat().st_size>1048576:raise ValueError('路径文件无效')
+            raw=path.read_bytes();path.unlink()
+            if hashlib.sha256(raw).hexdigest()!=values['sha256']:raise ValueError('路径校验失败')
+            payload=json.loads(raw)
+            if payload['project_id']!=json.loads((self.root/'project.json').read_text())['id']:raise ValueError('路径与工程不匹配')
+            self._check_road(request,payload['points']);return
         target = tuple(float(values[name]) for name in ('x','y','yaw'))
         if not all(math.isfinite(value) for value in target):
             raise ValueError('目标坐标必须是有限数值')
@@ -476,17 +514,27 @@ class NavigationRuntime:
             handle.get_result_async().add_done_callback(complete)
         future.add_done_callback(accepted)
 
-    def _navigate(self, request, target):
+    def _navigate(self, request, target, path=None):
         from nav2_msgs.action import NavigateToPose
-        goal = NavigateToPose.Goal()
-        goal.pose = self._stamped(*target)
+        if path:
+            from nav2_msgs.action import FollowPath
+            from nav_msgs.msg import Path as RosPath
+            goal=FollowPath.Goal();goal.path=RosPath();goal.path.header=self._stamped(*path[0]).header
+            goal.path.poses=[self._stamped(*point) for point in path]
+            goal.controller_id='FollowPath';goal.goal_checker_id='general_goal_checker'
+            self.path=list(path)
+        else:
+            goal = NavigateToPose.Goal()
+            goal.pose = self._stamped(*target)
+        self._resume_path=path
+        self.route_id=uuid.uuid4().hex if path else None;self.blocked_at=None
         epoch = int(request['epoch'])
         self.goal_epoch = epoch
         self._resume_target = target
         self._navigation_accept_pending = True
         self.goal_state = 'accepted'
         self.command = None
-        future = self.navigator.send_goal_async(goal, feedback_callback=self._feedback)
+        future = (self.follower if path else self.navigator).send_goal_async(goal, feedback_callback=self._feedback)
         def accepted(done):
             try:
                 handle = done.result()
@@ -500,7 +548,7 @@ class NavigationRuntime:
                     self._reply(request, error='导航已取消，未开始行驶')
                 else:
                     self.goal_state = 'navigating'
-                    self.detail = '正在导航；动态障碍出现时 Nav2 将重新规划'
+                    self.detail = '正在沿已验证道路路径行驶；遇阻停车' if path else '正在导航；动态障碍出现时 Nav2 将重新规划'
                     if self._traffic_holds() or self._traffic_paused:
                         self._pause_for_traffic()
                     self._reply(request, dict(running=True, accepted=True, goal_state=self.goal_state))
@@ -531,12 +579,14 @@ class NavigationRuntime:
                         self.goal_state, self.detail = 'error', '导航结果读取失败'
                     self.revoked_epoch = max(self.revoked_epoch,epoch)
                     self._resume_target = None
+                    self._resume_path = None
                     self._traffic_paused = False
                     self.goal_handle = None
                     self.cancel_future = None
                     self.command = None
                     if self.last_sent:
                         self._zero()
+                    if code==6 and path:self._inspect_blockage(epoch,path)
                 handle.get_result_async().add_done_callback(finished)
             except Exception as exc:
                 self._navigation_accept_pending = False
@@ -546,7 +596,7 @@ class NavigationRuntime:
         future.add_done_callback(accepted)
 
     def _feedback(self, message):
-        distance = float(message.feedback.distance_remaining)
+        distance = float(getattr(message.feedback,'distance_remaining',getattr(message.feedback,'distance_to_goal',float('nan'))))
         if math.isfinite(distance):
             self.distance_remaining = distance
 

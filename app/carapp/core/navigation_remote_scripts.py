@@ -106,6 +106,9 @@ def startup():
   if not info['publishers']['/scan_raw'] or not info['publishers']['/odom']:
    raise RuntimeError('雷达或里程计尚未运行')
   if owned(): raise RuntimeError('This owner already has a navigation process')
+  if 'project.json' in p['files']:
+   from ament_index_python.packages import get_package_share_directory
+   get_package_share_directory('nav2_regulated_pure_pursuit_controller')
   for name,descriptor in p['files'].items():
    path=root/name
    if path.is_symlink() or not path.is_file(): raise RuntimeError('Missing session file')
@@ -154,7 +157,8 @@ elif op=='prepare':
  os.mkdir(root,0o700); lease(False)
  output(dict(root=str(root),server_monotonic=time.monotonic(),temporary_paths=[str(root)]))
 elif op=='upload':
- if p['name'] not in ('map.yaml','map.pgm','runtime.py','config_builder.py','navigation.launch.py'):
+ if p['name'] not in ('map.yaml','map.pgm','runtime.py','config_builder.py','navigation.launch.py',
+                      'road_runtime.py','keepout.yaml','keepout.pgm','project.json','road_config.py','path_rules.py') and not re.fullmatch(r'route_[a-f0-9]{32}\.json',p['name']):
   raise ValueError('Unexpected session filename')
  path=root/p['name']; data=base64.b64decode(p['chunk'],validate=True)
  if len(data)>32768 or path.is_symlink(): raise ValueError('Invalid upload chunk')
@@ -178,7 +182,7 @@ elif op=='status':
   except (OSError,ValueError): value=dict(running=True,owned=True,ready=False,detail='导航服务启动中')
   value['connected']=True; output(value)
  else: output(dict(connected=True,running=False,owned=False,ready=False,goal_state='idle'))
-elif op in ('initial_pose','plan','navigate','cancel'): output(request())
+elif op in ('initial_pose','plan','navigate','follow_path','cancel'): output(request())
 elif op=='stop':
  lease(False) if root.exists() else None
  record=owned()

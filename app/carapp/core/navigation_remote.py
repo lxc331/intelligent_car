@@ -160,8 +160,15 @@ class NavigationRemote(MappingRemote):
         files = validate_bundle(map_bundle)
         folder = Path(__file__).parent
         files['runtime.py'] = (folder/'navigation_runtime.py').read_bytes()
+        files['road_runtime.py'] = (folder/'sandbox_runtime.py').read_bytes()
         files['config_builder.py'] = (folder/'navigation_config.py').read_bytes()
         files['navigation.launch.py'] = LAUNCH_SOURCE.encode('utf8')
+        if 'project_id' in map_bundle:
+            files['keepout.yaml']=map_bundle['keepout_yaml'].encode('utf8')
+            files['keepout.pgm']=map_bundle['keepout_bytes']
+            files['project.json']=json.dumps({'id':map_bundle['project_id']}).encode()
+            for source,target in [('sandbox_navconfig.py','road_config.py'),('navigation_path.py','path_rules.py')]:
+                files[target]=(folder/source).read_bytes()
         with self._lock:
             if self._lease_exists:
                 raise NavigationRemoteError('导航服务已启动，请先结束再重新载入地图')
@@ -211,7 +218,7 @@ class NavigationRemote(MappingRemote):
             result = self._remote('status')
             if 'pose' in result:
                 result['pose_age'] = float(result.get('pose_age', 0.)) + time.monotonic() - began
-            if result.get('goal_state') in ('succeeded','canceled','aborted','error'):
+            if result.get('goal_state') in ('succeeded','canceled','aborted','error','blocked'):
                 with self._intent_lock:
                     self._motion_allowed = False
             return result
@@ -241,7 +248,22 @@ class NavigationRemote(MappingRemote):
             return self._remote('plan',values=values,epoch=self.capture_intent(),
                                 request_timeout=18,timeout=21)
 
-    def navigate(self, x, y, yaw, *, intent_epoch=None):
+    def follow_path(self, points, *, project_id, intent_epoch=None):
+        from carapp.core.navigation_path import checked_path
+        points=checked_path(points)
+        raw=json.dumps(dict(points=points,project_id=project_id),allow_nan=False).encode()
+        with self._lock:
+            ticket=self.capture_intent() if intent_epoch is None else intent_epoch
+            name='route_'+uuid.uuid4().hex+'.json'
+            for offset in range(0,len(raw),32768):
+                if ticket!=self.capture_intent():raise NavigationRemoteError('路径上传已取消')
+                chunk=raw[offset:offset+32768]
+                answer=self._remote('upload',name=name,offset=offset,chunk=base64.b64encode(chunk).decode())
+                if answer.get('written')!=len(chunk):raise NavigationRemoteError('路径上传不完整')
+            return self.navigate(*points[-1],intent_epoch=ticket,
+                _route=dict(path_file=name,sha256=hashlib.sha256(raw).hexdigest(),project_id=project_id))
+
+    def navigate(self, x, y, yaw, *, intent_epoch=None, _route=None):
         values = target_values(x,y,yaw)
         with self._lock:
             if not self._lease_exists or self._clock_offset is None:
@@ -259,7 +281,7 @@ class NavigationRemote(MappingRemote):
                 with self._intent_lock:
                     if epoch != self._intent_epoch or not self._motion_allowed:
                         raise NavigationRemoteError('导航授权提交期间已取消')
-                result = self._remote('navigate',values=values,epoch=epoch,request_timeout=8,timeout=11)
+                result = self._remote('follow_path' if _route else 'navigate',values=_route or values,epoch=epoch,request_timeout=8,timeout=11)
                 with self._intent_lock:
                     if epoch != self._intent_epoch:
                         raise NavigationRemoteError('导航请求提交期间已取消')

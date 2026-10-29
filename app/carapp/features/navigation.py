@@ -19,6 +19,7 @@ from carapp.core.navigation_remote import NavigationRemote
 from carapp.core.navigation_session import NavigationSession
 from carapp.core.road_network import find_road_network, load_road_network
 from carapp.features.base import Feature
+from carapp.features.sandbox_navigation import SandboxNavigation
 from carapp.ui import theme
 from carapp.ui.mapping_camera import MappingCamera
 from carapp.ui.navigation_map import NavigationMapPanel
@@ -60,10 +61,12 @@ class NavigationFeature(Feature):
         self._map_label_text = "未导入地图"
         self._status_text = "导入已保存的 map.yaml，再连接并启动定位；点选目标后开始导航。"
         self._status_error = False
+        self.sandbox = SandboxNavigation(self)
 
     @property
     def motion_active(self):
         return bool(self._navigate_after_plan is not None or
+                    self.sandbox.motion_active or
                     (self.session and self.session.snapshot().get("motion_active")) or
                     any(session.snapshot().get("motion_active") for session in self._retired_sessions))
 
@@ -81,6 +84,7 @@ class NavigationFeature(Feature):
         self.map_label = tk.Label(row, text="未导入地图", bg=theme.PANEL, fg=theme.TEXT_DIM,
                                   anchor="w", font=theme.FONT_SMALL)
         self.map_label.pack(side="left", fill="x", expand=True, padx=6)
+        self.sandbox.build(panel)
         row = tk.Frame(panel, bg=theme.PANEL)
         row.pack(fill="x")
         self.peer = tk.Label(row, text="当前车：%s" % self.ctx.cfg["car"]["host"],
@@ -177,6 +181,7 @@ class NavigationFeature(Feature):
         return True
 
     def _install_map(self, bundle, model):
+        self.sandbox.reset()
         self.bundle, self.goal = bundle, None
         self._planned_goal = None
         self.start_pose = None
@@ -228,7 +233,7 @@ class NavigationFeature(Feature):
             return self._notice("请先导入地图，再导入路网。", True)
         if path is None:
             path = filedialog.askopenfilename(title="导入路网 YAML",
-                initialdir=str(APP_DIR / "savedMap"),
+                initialdir=str(Path(APP_DIR) / "savedMap"),
                 filetypes=[("路网 YAML", "*.yaml *.yml"), ("所有文件", "*.*")])
             if not path:
                 return False
@@ -236,6 +241,7 @@ class NavigationFeature(Feature):
             network = load_road_network(path)
         except (ValueError, OSError) as exc:
             return self._notice("路网读取失败：%s" % exc, True)
+        self.sandbox.reset()
         self._install_network(network, Path(path))
         return True
 
@@ -263,6 +269,8 @@ class NavigationFeature(Feature):
 
     def _preview_route(self):
         """Pure offline planning: no car, ROS or SSH involved."""
+        if self.sandbox.project:
+            return self.sandbox.plan(preview_start=self.start_pose)
         if self.network is None:
             return False
         if self.start_node is None or self.goal_node is None:
@@ -293,8 +301,7 @@ class NavigationFeature(Feature):
         self.map_panel.set_plan(points)
         self._notice("路网路径：%s；%.2f m / %d 个插值点。%s" % (
             " → ".join(str(node_id) for node_id in ids), self.network.path_length(ids), len(points),
-            "点“开始导航”由 Nav2 从当前位姿前往终点节点。" if self._ready()
-            else "连接并启动导航定位后即可开始导航。"))
+            "旧路网仅作预览；实车沿道路行驶请先配准并导入沙盘工程。"))
         return True
 
     def connect(self):
@@ -355,7 +362,7 @@ class NavigationFeature(Feature):
                 raise ValueError("导航速度需在 0.02–0.15 m/s")
             self.ctx.cfg.setdefault("navigation", {})["speed"] = speed
             save_config(self.ctx.cfg)
-            upload = self.bundle.as_upload()
+            upload = self.sandbox.project.upload() if self.sandbox.project else self.bundle.as_upload()
             self._start_record()
             if not self.session.submit("start", upload, speed=speed):
                 self._finish_record()
@@ -407,6 +414,9 @@ class NavigationFeature(Feature):
                 if self.start_node is None:
                     self.map_panel.set_goal((node.x, node.y,
                                              0. if node.yaw is None else float(node.yaw)))
+                    if self.sandbox.project:
+                        self.sandbox.plan()
+                        return
                     self._notice("目标：节点 %d；再点一个标记起点节点即可推演路网路径。" % node.id)
                     return
                 self.route = ()
@@ -434,6 +444,8 @@ class NavigationFeature(Feature):
             and not self.ctx.motion_in_use(exclude=self))
 
     def plan(self):
+        if self.sandbox.project is not None:
+            return self.sandbox.plan(preview_start=self.start_pose)
         if not self.goal or not self._ready() or self.motion_active:
             self._notice("规划未就绪：请先导入地图、启动服务、确认定位并标记空闲目标。", True)
             return False
@@ -448,6 +460,8 @@ class NavigationFeature(Feature):
         return accepted
 
     def navigate(self):
+        if self.network is not None:
+            return self.sandbox.plan(launch=True)
         if not self.plan():
             return False
         self._stop_requested = False
@@ -455,6 +469,7 @@ class NavigationFeature(Feature):
         return True
 
     def stop_all(self):
+        self.sandbox.stop()
         self._navigate_after_plan = None
         self._stop_requested = True
         if self.session:
@@ -523,6 +538,7 @@ class NavigationFeature(Feature):
         if self.session:
             for event in self.session.drain():
                 self._handle_event(event)
+        self.sandbox.on_background_tick()
         if self._record and self._record.camera is not self.ctx.app.camera:
             self.finish()
             self._finish_record()
@@ -594,6 +610,8 @@ class NavigationFeature(Feature):
             self.stop_all()
         if op in ("start", "status", "initial_pose", "stop"):
             self._accept_navigation_pose(event)
+        if op == "status":
+            self.sandbox.on_status(result)
         if "path" in result and op == "status" and (self.motion_active or self._planned_goal == self.goal):
             self.map_panel.set_plan(result["path"])
         phase = result.get("goal_state")
@@ -635,6 +653,7 @@ class NavigationFeature(Feature):
                            wraplength=width)
         self.map_label.config(text=self._map_label_text)
         self.peer.config(text="当前车：%s" % self.ctx.cfg["car"]["host"])
+        self.sandbox.on_tick()
         self.btn_import.config(state="disabled" if self._loading or self.engaged or self.motion_active else "normal")
         self.btn_navigate.config(state="normal" if self.goal and self._ready() and not self.motion_active else "disabled")
         self.map_panel.on_tick(st)
@@ -673,6 +692,7 @@ class NavigationFeature(Feature):
 
     def on_close(self):
         self.closed = True
+        self.sandbox.close()
         self._load_generation += 1
         self.disconnect()
         self._finish_record()
