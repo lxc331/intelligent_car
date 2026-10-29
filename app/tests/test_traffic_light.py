@@ -281,9 +281,11 @@ class TrafficLightMotionGateTests(unittest.TestCase):
         return message["linear"]["x"], message["linear"]["y"], message["angular"]["z"]
 
     def make_clear(self):
+        # Windows 上 time.monotonic() 每 15.6 ms 才走一格，紧接其后重新取时间戳会
+        # 与最后一帧相等，被 policy 当成重复帧丢弃。留出间隙，后续红灯帧必定更新。
         now = time.monotonic()
         with self.control.lock:
-            for stamp in (now - .9, now - .4, now):
+            for stamp in (now - .95, now - .5, now - .05):
                 self.control.policy.observe(False, stamp)
 
     def test_all_axes_are_replaced_with_zero_and_no_stale_command_is_replayed(self):

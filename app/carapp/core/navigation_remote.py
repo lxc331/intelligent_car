@@ -222,9 +222,23 @@ class NavigationRemote(MappingRemote):
             return self._remote('initial_pose',values=target_values(x,y,yaw),
                                 epoch=self.capture_intent(),request_timeout=5,timeout=8)
 
-    def plan(self, x, y, yaw):
+    def plan(self, x, y, yaw, *, start=None):
+        """Preview the planner's path; ``start`` previews from a chosen node.
+
+        Only the path is computed: no motion intent is granted, so a route
+        study can run without driving the car.
+        """
+        values = target_values(x,y,yaw)
+        if start is not None:
+            try:
+                start = tuple(start)
+            except TypeError:
+                raise ValueError('起点需要 x/y/yaw 三个数值') from None
+            if len(start) != 3:
+                raise ValueError('起点需要 x/y/yaw 三个数值')
+            values['start'] = target_values(*start)
         with self._lock:
-            return self._remote('plan',values=target_values(x,y,yaw),epoch=self.capture_intent(),
+            return self._remote('plan',values=values,epoch=self.capture_intent(),
                                 request_timeout=18,timeout=21)
 
     def navigate(self, x, y, yaw, *, intent_epoch=None):

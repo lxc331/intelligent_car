@@ -17,10 +17,13 @@ from carapp.core.navigation_map import load_navigation_map, valid_target
 from carapp.core.navigation_record import NavigationRecord
 from carapp.core.navigation_remote import NavigationRemote
 from carapp.core.navigation_session import NavigationSession
+from carapp.core.road_network import find_road_network, load_road_network
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.mapping_camera import MappingCamera
 from carapp.ui.navigation_map import NavigationMapPanel
+
+ROAD_SNAP = .5   # metres: click-to-node tolerance when picking road nodes
 
 
 class NavigationFeature(Feature):
@@ -44,6 +47,11 @@ class NavigationFeature(Feature):
         self._loading = False
         self._navigate_after_plan = None
         self._planned_goal = None
+        self.network = None
+        self.network_path = None
+        self.start_pose = None
+        self.start_node = self.goal_node = None
+        self.route = ()
         self._record = None
         self._last_frame = None
         self._last_goal_state = ""
@@ -92,11 +100,13 @@ class NavigationFeature(Feature):
         row = tk.Frame(panel, bg=theme.PANEL)
         row.pack(fill="x", pady=2)
         self.mode = tk.StringVar(value="goal")
-        for label, value in (("标记目标", "goal"), ("标定当前位置 / 朝向", "initial"), ("平移地图", "pan")):
+        for label, value in (("标记起点（路网）", "start"), ("标记目标", "goal"),
+                             ("标定当前位置 / 朝向", "initial"), ("平移地图", "pan")):
             tk.Radiobutton(row, text=label, variable=self.mode, value=value,
                            command=lambda: self.map_panel.set_mode(self.mode.get()),
                            bg=theme.PANEL, fg=theme.TEXT, selectcolor=theme.BG,
                            activebackground=theme.PANEL, font=theme.FONT_SMALL).pack(side="left")
+        self._button(row, "导入路网（YAML）", self.import_road_network)
         tk.Label(row, text="速度（m/s）", bg=theme.PANEL, fg=theme.TEXT_DIM).pack(side="left", padx=(8, 2))
         self.speed = tk.StringVar(value=str(self.ctx.cfg.get("navigation", {}).get("speed", .06)))
         tk.Spinbox(row, textvariable=self.speed, from_=.02, to=.15, increment=.01,
@@ -169,15 +179,123 @@ class NavigationFeature(Feature):
     def _install_map(self, bundle, model):
         self.bundle, self.goal = bundle, None
         self._planned_goal = None
+        self.start_pose = None
+        self.start_node = self.goal_node = None
+        self.route = ()
         self.model = model
         self.map_panel.set_model(model)
         self.map_panel.set_goal(None)
         self.map_panel.set_plan([])
         self.map_panel.set_initial(None)
+        self.map_panel.set_network(None)
         self.map_panel.reset_view()
         self._map_label_text = "%s | %d × %d | %.3f m/格" % (
             bundle.source_path.name, bundle.width, bundle.height, bundle.resolution)
+        beside_map = find_road_network(bundle.source_path) if bundle.source_path else None
+        if beside_map:
+            try:
+                self._install_network(load_road_network(beside_map), beside_map)
+                return
+            except ValueError as exc:
+                self.network, self.network_path = None, None
+                self._notice("地图已导入；同目录路网无法读取：%s" % exc, True)
+                return
+        self.network, self.network_path = None, None
         self._notice("地图已导入；连接并启动导航定位后，先标定小车实际位置和朝向。")
+
+    def _install_network(self, network, path=None):
+        self.network, self.network_path = network, path
+        self.start_pose = None
+        self.start_node = self.goal_node = None
+        self.route = ()
+        self.map_panel.set_network(network)
+        self.map_panel.set_route(())
+        self.map_panel.set_plan([])
+        if not network:
+            return self._notice("已清除路网。")
+        grid = getattr(self.bundle, "grid", None) if self.bundle else None
+        problems = network.check_map(grid) if grid else ()
+        text = "路网已载入：%d 个节点 / %d 条有向边。" % (len(network), len(network.edges()))
+        if problems:
+            text += " 其中 %d 处与当前地图不一致（节点或边落在障碍/未知区域）。" % len(problems)
+        text += "选“标记起点（路网）”后点节点，再点目标节点即可推演路径。"
+        self._notice(text, bool(problems))
+
+    def import_road_network(self, path=None):
+        if self._loading or self.motion_active:
+            return self._notice("请等待地图导入或停车完成，再载入路网。", True)
+        if not self.bundle:
+            return self._notice("请先导入地图，再导入路网。", True)
+        if path is None:
+            path = filedialog.askopenfilename(title="导入路网 YAML",
+                initialdir=str(APP_DIR / "savedMap"),
+                filetypes=[("路网 YAML", "*.yaml *.yml"), ("所有文件", "*.*")])
+            if not path:
+                return False
+        try:
+            network = load_road_network(path)
+        except (ValueError, OSError) as exc:
+            return self._notice("路网读取失败：%s" % exc, True)
+        self._install_network(network, Path(path))
+        return True
+
+    def _road_node(self, x, y, what):
+        if self.network is None:
+            self._notice("当前地图没有路网：点“导入路网（YAML）”，或把 road_network.yaml 放在地图同目录后重新导入地图。", True)
+            return None
+        node, metres = self.network.nearest_node(x, y)
+        if metres > ROAD_SNAP:
+            self._notice("%s离最近节点 %d 有 %.2f m（上限 %.2f m），请点在路网节点上。" % (
+                what, node.id, metres, ROAD_SNAP), True)
+            return None
+        return node
+
+    def _route_goal_pose(self, ids):
+        last = self.network.node(ids[-1])
+        if last.yaw is not None:
+            yaw = last.yaw
+        elif len(ids) > 1:
+            before = self.network.node(ids[-2])
+            yaw = math.atan2(last.y - before.y, last.x - before.x)
+        else:
+            yaw = 0.
+        return float(last.x), float(last.y), float(yaw)
+
+    def _preview_route(self):
+        """Pure offline planning: no car, ROS or SSH involved."""
+        if self.network is None:
+            return False
+        if self.start_node is None or self.goal_node is None:
+            self.route = ()
+            self.map_panel.set_route(())
+            self.map_panel.set_plan([])
+            self._planned_goal = None
+            if self.start_node is not None:
+                self._notice("起点：节点 %d；再点一个目标节点即可推演路径。" % self.start_node.id)
+            elif self.goal_node is not None:
+                self._notice("目标：节点 %d；再点一个标记起点节点即可推演路径。" % self.goal_node.id)
+            return False
+        try:
+            ids = self.network.shortest_path(self.start_node.id, self.goal_node.id)
+            points = self.network.dense_path(ids)
+        except ValueError as exc:
+            self.route = ()
+            self.map_panel.set_route(())
+            self.map_panel.set_plan([])
+            self._notice("路网推演失败：%s" % exc, True)
+            return False
+        self.route = ids
+        self.goal = self._route_goal_pose(ids)
+        self.goal_node = self.network.node(ids[-1])
+        self._planned_goal = None
+        self.map_panel.set_goal(self.goal)
+        self.map_panel.set_route(ids)
+        self.map_panel.set_plan(points)
+        self._notice("路网路径：%s；%.2f m / %d 个插值点。%s" % (
+            " → ".join(str(node_id) for node_id in ids), self.network.path_length(ids), len(points),
+            "点“开始导航”由 Nav2 从当前位姿前往终点节点。" if self._ready()
+            else "连接并启动导航定位后即可开始导航。"))
+        return True
 
     def connect(self):
         if self._loading or self.motion_active or self.ctx.motion_in_use(exclude=self):
@@ -262,6 +380,15 @@ class NavigationFeature(Feature):
         if not self.bundle or not valid_target(self.bundle, x, y) or not math.isfinite(yaw):
             return self._notice("请选择地图内的空闲区域；障碍物和未知区域不能作为位置。", True)
         pose = float(x), float(y), float(yaw)
+        if mode == "start":
+            node = self._road_node(x, y, "起点")
+            if node is None:
+                return
+            pose = (float(node.x), float(node.y), 0. if node.yaw is None else float(node.yaw))
+            self.start_pose, self.start_node = pose, node
+            self.map_panel.set_start(pose, node.id)
+            self._preview_route()
+            return
         if mode == "initial":
             remote = self.session.snapshot() if self.session else {}
             if not self.engaged or not remote.get("running") or self.ctx.motion_in_use(exclude=self):
@@ -272,6 +399,21 @@ class NavigationFeature(Feature):
                 self.map_panel.set_plan([])
                 self._notice("已发送当前位置和朝向，等待雷达定位确认。")
         else:
+            if self.network is not None:
+                node = self._road_node(x, y, "目标")
+                if node is None:
+                    return
+                self.goal_node = node
+                if self.start_node is None:
+                    self.map_panel.set_goal((node.x, node.y,
+                                             0. if node.yaw is None else float(node.yaw)))
+                    self._notice("目标：节点 %d；再点一个标记起点节点即可推演路网路径。" % node.id)
+                    return
+                self.route = ()
+                self.map_panel.set_plan([])
+                self._preview_route()
+                return
+            self.goal_node = None
             self.goal = pose
             self._planned_goal = None
             self.map_panel.set_goal(pose)
@@ -295,7 +437,12 @@ class NavigationFeature(Feature):
         if not self.goal or not self._ready() or self.motion_active:
             self._notice("规划未就绪：请先导入地图、启动服务、确认定位并标记空闲目标。", True)
             return False
-        accepted = self.session.submit("plan", *self.goal)
+        if self.route:
+            # Preview the planner's own path from the chosen road node: plan only
+            # computes a path and never grants motion.
+            accepted = self.session.submit("plan", *self.goal, start=self.start_pose)
+        else:
+            accepted = self.session.submit("plan", *self.goal)
         if accepted:
             self._notice("正在计算可通行路径…")
         return accepted

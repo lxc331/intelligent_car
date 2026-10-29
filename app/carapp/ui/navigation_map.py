@@ -17,8 +17,12 @@ class NavigationMapPanel(MapPanel):
         self.on_pose = on_pose
         self.mode = "goal"
         self.goal = None
+        self.start = None
         self.initial = None
         self.plan = ()
+        self.network = None
+        self.route = ()
+        self._start_id = None
         self._selection = None
         self._selection_error = ""
         self._localized = None
@@ -44,7 +48,7 @@ class NavigationMapPanel(MapPanel):
                 widget.configure(text="浅色：空闲　深色：占用　灰色：未知　左键选点/拖出朝向　右键平移　滚轮缩放")
 
     def set_mode(self, mode):
-        if mode not in ("goal", "initial", "pan"):
+        if mode not in ("goal", "start", "initial", "pan"):
             raise ValueError("地图操作模式无效")
         self.mode = mode
         self._selection = None
@@ -58,8 +62,10 @@ class NavigationMapPanel(MapPanel):
         self._source_revision = self._render_key = self._last_state = None
         self._selection = None
         self._selection_error = ""
-        self.goal = self.initial = None
+        self.goal = self.initial = self.start = None
         self.plan = ()
+        self.route = ()
+        self._start_id = None
         self.set_localization(False, "请启动导航定位，并标定实际位置与朝向")
         self.reset_view()
 
@@ -101,6 +107,20 @@ class NavigationMapPanel(MapPanel):
         if not all(math.isfinite(v) for p in self.plan for v in p):
             self.plan = ()
             raise ValueError("路径点需要有限坐标")
+
+    def set_network(self, network):
+        """Overlay a road network loaded beside the map; ``None`` clears it."""
+        self.network = network
+        self.route = ()
+        self.start = None
+        self._start_id = None
+
+    def set_start(self, pose, node_id=None):
+        self.start = self._pose(pose)
+        self._start_id = None if node_id is None else int(node_id)
+
+    def set_route(self, ids):
+        self.route = tuple(int(node_id) for node_id in ids)
 
     def canvas_to_world(self, x, y):
         if not self._grid:
@@ -162,15 +182,42 @@ class NavigationMapPanel(MapPanel):
                                 arrow="last", fill=color, width=2, tags=tag)
         self.canvas.create_text(x + 8, y - 12, text=label, anchor="w", fill=color, tags=tag)
 
+    def _draw_network(self, geometry):
+        """Road graph under the markers; the selected route is drawn brighter."""
+        network = self.network
+        points = {node.id: self._point(node.x, node.y, geometry) for node in network}
+        route = set(zip(self.route, self.route[1:]))
+        for source, target, _metres in network.edges():
+            if (source, target) in route or source not in points or target not in points:
+                continue
+            self.canvas.create_line(*points[source], *points[target],
+                                    fill="#3d6b73", width=1, tags="nav_network")
+        for source, target in route:
+            if source in points and target in points:
+                self.canvas.create_line(*points[source], *points[target],
+                                        fill=theme.ACCENT, width=3, tags="nav_network")
+        on_route = set(self.route)
+        for node in network:
+            x, y = points[node.id]
+            color = "#5ad1a5" if node.id == self._start_id else (
+                theme.ACCENT if node.id in on_route else "#8aa0a6")
+            self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=color, outline="",
+                                    tags="nav_network")
+            self.canvas.create_text(x + 5, y + 5, text=str(node.id), anchor="nw",
+                                    fill="#a9c3c8", font=theme.FONT_SMALL, tags="nav_network")
+
     def _draw(self, snapshot):
         visible = snapshot
         if self._localized is False:
             visible = dict(snapshot, pose=None, trajectory=())
         super()._draw(visible)
-        self.canvas.delete("nav_path", "nav_goal", "nav_initial", "nav_select")
+        self.canvas.delete("nav_path", "nav_goal", "nav_initial", "nav_select",
+                           "nav_network", "nav_start")
         if not self._grid:
             return
         geometry = self._geometry()
+        if self.network is not None:
+            self._draw_network(geometry)
         if len(self.plan) > 1:
             points = [v for point in self.plan for v in self._point(*point, geometry)]
             self.canvas.create_line(*points, fill="#f0a52b", width=3, tags="nav_path")
@@ -178,6 +225,8 @@ class NavigationMapPanel(MapPanel):
                 self.canvas.tag_lower("nav_path", "vehicle")
         self._marker(self.goal, "#ed6670", "目标", "nav_goal", geometry)
         self._marker(self.initial, "#a98bff", "初始位姿", "nav_initial", geometry)
+        if self.start is not None:
+            self._marker(self.start, "#5ad1a5", "起点", "nav_start", geometry)
         pose = visible.get("pose")
         if pose is not None:
             self.canvas.delete("vehicle")

@@ -397,6 +397,13 @@ class NavigationRuntime:
         target = tuple(float(values[name]) for name in ('x','y','yaw'))
         if not all(math.isfinite(value) for value in target):
             raise ValueError('目标坐标必须是有限数值')
+        start = values.get('start')
+        if start is not None:
+            if not isinstance(start,(list,tuple)) or len(start) != 3:
+                raise ValueError('起点需要 x/y/yaw 三个数值')
+            start = tuple(float(value) for value in start)
+            if not all(math.isfinite(value) for value in start):
+                raise ValueError('起点坐标必须是有限数值')
         if operation == 'initial_pose':
             from geometry_msgs.msg import PoseWithCovarianceStamped
             if self.goal_handle:
@@ -421,18 +428,22 @@ class NavigationRuntime:
         if epoch < int(self.lease.get('epoch',0)) or epoch <= self.revoked_epoch:
             raise RuntimeError('该导航请求已被停止操作作废')
         if operation == 'plan':
-            self._plan(request, target)
+            self._plan(request, target, start)
         elif operation == 'navigate':
             self._navigate(request, target)
         else:
             raise ValueError('Unknown runtime operation')
 
-    def _plan(self, request, target):
+    def _plan(self, request, target, start=None):
+        # plan only computes a path. With an explicit start the planner previews
+        # a route from a chosen road-network node while the car stays still.
         from nav2_msgs.action import ComputePathToPose
         goal = ComputePathToPose.Goal()
         goal.goal = self._stamped(*target)
         goal.planner_id = 'GridBased'
-        goal.use_start = False
+        goal.use_start = start is not None
+        if start is not None:
+            goal.start = self._stamped(*start)
         key = request['request_id']
         self.pending[key] = dict(request=request, deadline=time.monotonic()+16., handle=None)
         future = self.planner.send_goal_async(goal)
