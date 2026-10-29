@@ -12,3 +12,10 @@ __pycache__/
 
 # Local captured frames, videos and maps
 /app/捕获/
+
+# Local runtime artifacts (Sogou IME writes app/debug.log here)
+/app/debug.log
+
+# Local notes and artifacts under DSH_Home
+/DSH_Home/.work/
+

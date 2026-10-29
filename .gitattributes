@@ -1,0 +1,11 @@
+# 换行符约定（2026-10-28 新增）
+#
+# 背景：Windows 批处理文件用 LF 换行时 cmd.exe 会解析错乱（会去执行被截断的
+# 半行内容，例如报 "'痌' 不是内部或外部命令"），run.bat 因此无法双击启动。
+# 仓库里以 LF 存储、检出时转成 CRLF，保证任何机器 clone 下来都能直接运行。
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Linux 端脚本必须保持 LF，否则在车上（Ubuntu）执行会报 /bin/sh^M
+*.sh  text eol=lf
