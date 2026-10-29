@@ -33,6 +33,36 @@ class TrafficSceneTests(unittest.TestCase):
         for stamp in (10., 10.3, 10.6):
             self.assertFalse(policy.observe((RED,), (640, 480), stamp))
         self.assertIsNone(policy.snapshot()["speed_limit"])
+        # The red light is still tracked on its own: it is what makes the camera
+        # dip to look for the crosswalk.
+        self.assertTrue(policy.snapshot()["red_pending"])
+
+    def test_red_first_then_crosswalk_arms_the_stop(self):
+        policy = TrafficScenePolicy()
+        self.assertFalse(policy.observe((RED,), (640, 480), 10.))
+        self.assertFalse(policy.observe((RED,), (640, 480), 10.3))
+        self.assertTrue(policy.red_pending)
+        self.assertFalse(policy.red_required)
+        self.assertEqual(policy.snapshot()["scene"], "前方红灯，确认斑马线")
+        self.assertFalse(policy.observe((WALK, RED), (640, 480), 10.6))
+        self.assertFalse(policy.observe((WALK, RED), (640, 480), 10.9))
+        self.assertTrue(policy.observe((WALK, RED), (640, 480), 11.2))
+        self.assertTrue(policy.red_required)
+        self.assertTrue(policy.snapshot()["crosswalk_active"])
+        self.assertEqual(policy.snapshot()["scene"], "红灯确认，路口停车")
+
+    def test_red_stop_holds_when_the_lamp_leaves_the_view(self):
+        # While stopped the camera lifts to the lamp, then dips again; a single
+        # missed frame of red must not release the stop.
+        policy = TrafficScenePolicy(red_frames=2, red_hold=.6)
+        for stamp in (10., 10.3):
+            policy.observe((RED,), (640, 480), stamp)
+        for stamp in (10.6, 10.9, 11.2):
+            policy.observe((WALK, RED), (640, 480), stamp)
+        self.assertTrue(policy.red_required)
+        self.assertTrue(policy.observe((WALK,), (640, 480), 11.5))
+        self.assertFalse(policy.observe((WALK,), (640, 480), 11.9))
+        self.assertFalse(policy.red_required)
 
     def test_three_consecutive_distinct_near_crosswalk_frames_required(self):
         policy = TrafficScenePolicy()
@@ -100,6 +130,31 @@ class TrafficSceneTests(unittest.TestCase):
         policy.reset()
         self.activate(policy, (WALK, obj("go", (300, 60, 40, 40))))
         self.assertIn("直行路口", policy.snapshot()["scene"])
+
+    def test_two_frame_confirmation_holds_through_a_single_missed_detection(self):
+        policy = TrafficScenePolicy(red_frames=2, red_hold=.6)
+        self.activate(policy)
+        self.assertFalse(policy.observe((RED,), (640, 480), 10.9))
+        self.assertTrue(policy.observe((RED,), (640, 480), 11.2))
+        self.assertTrue(policy.observe((), (640, 480), 11.5))
+        self.assertFalse(policy.observe((), (640, 480), 12.3))
+        for bad in (0, 6, True, 1.5, "2"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "红灯确认帧数无效"):
+                TrafficScenePolicy(red_frames=bad)
+        for bad in (-.1, float("nan")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "红灯保持时间无效"):
+                TrafficScenePolicy(red_hold=bad)
+
+    def test_red_area_threshold_can_be_lowered_for_small_lights(self):
+        small = obj("red", (300, 60, 16, 15))
+        for policy, expected in ((TrafficScenePolicy(), False),
+                                 (TrafficScenePolicy(red_area_min=200.), True)):
+            self.activate(policy)
+            self.assertIs(policy.observe((WALK, small), (640, 480), 10.9), expected)
+            self.assertEqual(policy.snapshot()["red_area_min"], 200. if expected else 700.)
+        for bad in (0., -1., float("nan"), float("inf")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "红灯面积门限无效"):
+                TrafficScenePolicy(red_area_min=bad)
 
     def test_speed_limit_preserves_lower_speeds_curvature_and_zero_commands(self):
         self.assertEqual(limit_twist(.06, 0., .3, .1), (.06, 0., .3))
@@ -197,6 +252,79 @@ class TrafficSceneSwitchTests(unittest.TestCase):
         for at in (12., 12.4, 12.81):
             self.send(at, (RED,))
         self.assertFalse(self.control.snapshot()["blocked"])
+
+
+GREEN = obj("green", (300, 40, 40, 40))
+
+
+class GreenReleaseTests(unittest.TestCase):
+    """「绿灯确认才放行」是可选项，默认关；打开后要看到绿灯才松刹车。"""
+
+    def policy(self, **extra):
+        values = dict(red_area_min=200., red_frames=1, red_hold=0.,
+                      green_area_min=200., release_green_frames=2, release_timeout=5.)
+        values.update(extra)
+        return TrafficScenePolicy(**values)
+
+    def activate(self, policy, start=10.):
+        for stamp in (start, start + .3, start + .6):
+            policy.observe((WALK,), (640, 480), stamp)
+        self.assertTrue(policy.snapshot()["crosswalk_active"])
+        return start + .9
+
+    def test_default_keeps_the_old_behaviour(self):
+        policy = TrafficScenePolicy(red_area_min=200., red_frames=1, red_hold=0.)
+        self.assertEqual(policy.release_green_frames, 0)
+        stamp = self.activate(policy)
+        policy.observe((RED,), (640, 480), stamp)
+        self.assertTrue(policy.snapshot()["red_pending"])
+        policy.observe((), (640, 480), stamp + .3)
+        self.assertFalse(policy.snapshot()["red_pending"])
+        self.assertFalse(policy.snapshot()["green_pending"])
+
+    def test_red_gone_but_green_missing_keeps_holding(self):
+        policy = self.policy()
+        stamp = self.activate(policy)
+        policy.observe((RED,), (640, 480), stamp)
+        self.assertTrue(policy.snapshot()["crosswalk_active"])
+        self.assertTrue(policy.snapshot()["red_pending"])
+        for step in range(1, 4):
+            policy.observe((), (640, 480), stamp + .3 * step)
+        snapshot = policy.snapshot()
+        self.assertTrue(snapshot["red_pending"])
+        self.assertTrue(snapshot["waiting_green"])
+        self.assertIn("等待绿灯确认", snapshot["scene"])
+
+    def test_green_confirmation_releases_the_brake(self):
+        policy = self.policy()
+        stamp = self.activate(policy)
+        policy.observe((RED,), (640, 480), stamp)
+        for step in range(1, 4):
+            policy.observe((), (640, 480), stamp + .3 * step)
+        self.assertTrue(policy.snapshot()["red_pending"])
+        policy.observe((GREEN,), (640, 480), stamp + 1.2)
+        self.assertFalse(policy.snapshot()["green_pending"], "一帧不够")
+        policy.observe((GREEN,), (640, 480), stamp + 1.5)
+        snapshot = policy.snapshot()
+        self.assertTrue(snapshot["green_pending"])
+        self.assertFalse(snapshot["red_pending"])
+        self.assertFalse(snapshot["waiting_green"])
+
+    def test_release_timeout_frees_a_junction_with_a_broken_lamp(self):
+        policy = self.policy(release_timeout=2.)
+        stamp = self.activate(policy)
+        policy.observe((RED,), (640, 480), stamp)
+        for step in range(1, 10):
+            policy.observe((), (640, 480), stamp + .3 * step)
+        self.assertFalse(policy.snapshot()["red_pending"])
+        self.assertFalse(policy.snapshot()["waiting_green"])
+
+    def test_parameters_are_validated(self):
+        for extra in (dict(green_area_min=0.), dict(release_green_frames=-1),
+                      dict(release_green_frames=6), dict(release_green_frames=True),
+                      dict(release_timeout=-.1), dict(release_timeout=float("nan"))):
+            with self.assertRaises(ValueError):
+                TrafficScenePolicy(**extra)
 
 
 if __name__ == "__main__":

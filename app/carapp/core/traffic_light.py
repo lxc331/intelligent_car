@@ -1,4 +1,5 @@
 """Latest-frame traffic-light interlock, independent of Tk and page rendering."""
+import math
 import threading
 import time
 from carapp.core.traffic_scene import TrafficScenePolicy, limit_twist
@@ -65,14 +66,14 @@ class TrafficLightController:
     red observation and a command cannot overtake each other at publication.
     All callbacks are pure data/communication callbacks, never Tk operations.
     """
-    def __init__(self, stop, changed=None, detector=None, *, clock=time.monotonic):
+    def __init__(self, stop, changed=None, detector=None, *, clock=time.monotonic, scene=None):
         if detector is None:
             from carapp.core.traffic_light_detector import TrafficLightDetector
             detector = TrafficLightDetector()
         self.detector, self.stop = detector, stop
         self.changed = changed or (lambda value: None)
         self.clock, self.policy = clock, TrafficLightPolicy(clock)
-        self.scene = TrafficScenePolicy()
+        self.scene = scene if scene is not None else TrafficScenePolicy()
         self.lock = threading.RLock()
         self.wake, self.halt = threading.Event(), threading.Event()
         self.generation = 0
@@ -225,3 +226,123 @@ class TrafficLightController:
         self.wake.set()
         self.thread.join(timeout=1.)
         self.watchdog.join(timeout=1.)
+
+
+class JunctionViews:
+    """Sequences the forward, dip and look-up views for one junction.
+
+    The business rule is red first, crosswalk second: as soon as the forward
+    view reports a red light the camera dips to confirm the crosswalk stop line,
+    and once the crosswalk is confirmed the camera lifts so the lamp can be
+    watched while the car holds.  The reverse order still works when the
+    crosswalk is confirmed before any lamp is seen.  Actions are returned
+    instead of sent so the sequence stays testable without hardware.
+    """
+    FORWARD = "forward"
+    DIP = "dip"
+    LIFT = "lift"
+    RESTORE = "restore"
+    MIN_PITCH = 1150
+    MAX_PITCH = 2250
+
+    def __init__(self, pitch=1720, dip=1450, restore=1500, delay=1.4, hold=8., retry=.8, dip_hold=1.2,
+                 settle=0.):
+        self.pitch = self._target("红灯确认仰角", pitch)
+        self.dip = self._target("斑马线确认俯角", dip)
+        self.restore = self._target("红灯恢复俯仰", restore)
+        self.delay = self._seconds("红灯确认抬起延时", delay)
+        self.hold = self._seconds("红灯确认保持时间", hold)
+        self.retry = self._seconds("红灯确认重试间隔", retry)
+        self.dip_hold = self._seconds("斑马线确认俯视时间", dip_hold)
+        self.settle = self._seconds("红灯确认视角切换稳定时间", settle)
+        self.reset()
+
+    def _target(self, name, value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(name + "无效")
+        number = int(value)
+        if not self.MIN_PITCH <= number <= self.MAX_PITCH:
+            raise ValueError(name + "需在 %d–%d" % (self.MIN_PITCH, self.MAX_PITCH))
+        return number
+
+    @staticmethod
+    def _seconds(name, value):
+        if isinstance(value, bool):
+            raise ValueError(name + "无效")
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(name + "无效")
+        if not math.isfinite(number) or number < 0.:
+            raise ValueError(name + "无效")
+        return number
+
+    def reset(self):
+        self.view = self.FORWARD
+        self.view_at = None
+        self.red_at = None
+        self.retry_at = 0.
+        self.settle_until = None
+
+    @property
+    def lifted(self):
+        return self.view == self.LIFT
+
+    def _go(self, view, now):
+        self.view, self.view_at = view, now
+        # Frames captured while the gimbal is still moving are unreliable; the
+        # caller keeps updating the servo and the sequence ignores detections
+        # until the view has settled.
+        self.settle_until = (now + self.settle) if self.settle > 0. else None
+
+    def step(self, red, active, now):
+        """Return (action, notice); action is None, DIP, LIFT or RESTORE.
+
+        red: the scene saw a red light (independent of the crosswalk).
+        active: the crosswalk stop line is confirmed ahead.
+        """
+        if self.settle_until is not None and now < self.settle_until:
+            return None, ""
+        if self.view == self.DIP:
+            if active:
+                self._go(self.LIFT, now)
+                return self.LIFT, "斑马线确认，抬头确认红灯 %d" % self.pitch
+            if now - self.view_at >= self.dip_hold:
+                self._go(self.FORWARD, now)
+                self.retry_at = now + self.retry
+                return self.RESTORE, "未确认斑马线，云台复位 %d" % self.restore
+            return None, ""
+        if self.view == self.LIFT:
+            if red:
+                if self.red_at is None:
+                    self.red_at = now
+                    return None, "红灯确认，斑马线前停车"
+                return None, ""
+            if not active:
+                # The crosswalk left the view: the car has passed the junction.
+                if now - self.view_at >= self.delay:
+                    self._go(self.FORWARD, now)
+                    self.retry_at = now + self.retry
+                    self.red_at = None
+                    return self.RESTORE, "离开路口，云台复位 %d" % self.restore
+                return None, ""
+            if self.red_at is None and now - self.view_at >= self.hold:
+                # Staring at a lamp that never reads red for too long is not
+                # useful: fall back to the forward view and retry later.
+                self._go(self.FORWARD, now)
+                self.retry_at = now + self.retry
+                return self.RESTORE, "未确认红灯，云台复位 %d" % self.restore
+            return None, ""
+        if now < self.retry_at:
+            return None, ""
+        if red and not active:
+            self.red_at = None
+            self._go(self.DIP, now)
+            return self.DIP, "前方红灯，俯视确认斑马线 %d" % self.dip
+        if active and not red:
+            self._go(self.LIFT, now)
+            return self.LIFT, "路口确认，抬头确认红绿灯 %d" % self.pitch
+        return None, ""
+
+
+LookUpConfirm = JunctionViews

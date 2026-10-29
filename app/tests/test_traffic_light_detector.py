@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image, ImageDraw
 
-from carapp.core.traffic_light_detector import MODEL_DIR, TrafficLightDetector
+from carapp.core.traffic_light_detector import (MODEL_DIR, TrafficLightDetector,
+                                               parse_red_aspect, parse_zoom_regions)
 from carapp.core.traffic_light import TrafficLightController
 from carapp.features.base import AppContext
 from carapp.config import DEFAULTS
@@ -75,7 +76,7 @@ class TrafficLightDetectorTests(unittest.TestCase):
 
     def test_side_bottom_and_padding_boxes_do_not_stop(self):
         detector = self.make((0, 60, 30, 100, .9, 3),
-                             (140, 280, 180, 310, .9, 3))
+                             (140, 300, 180, 318, .9, 3))
         self.assertFalse(detector.detect(encode(Image.new("RGB", (320, 320), "white")), "png").red)
         detector = self.make((140, 0, 180, 30, .9, 3))
         self.assertFalse(detector.detect(encode(Image.new("RGB", (640, 480), "white")), "png").red)
@@ -139,10 +140,97 @@ class TrafficLightDetectorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "red / green"):
                 TrafficLightDetector(model_dir=folder, infer=self.infer)._load_metadata()
 
+    def test_zoom_regions_recover_small_lights_and_map_boxes_to_the_frame(self):
+        infer = Mock(side_effect=[output(), output((100, 60, 130, 100, .86, 3))])
+        detector = TrafficLightDetector(infer=infer, zoom=((0., 0., .5, .6),))
+        result = detector.detect(encode(Image.new("RGB", (640, 480), "white")), "png")
+        self.assertEqual(infer.call_count, 2)
+        self.assertEqual(infer.call_args_list[0].args[0].shape, (1, 3, 320, 320))
+        self.assertTrue(result.red)
+        self.assertEqual(result.boxes, ((100, 44, 30, 40),))
+        self.assertEqual([item.label for item in result.objects], ["red"])
+
+    def test_zoom_pass_duplicates_merge_into_one_object(self):
+        infer = Mock(side_effect=[output((130, 60, 250, 140, .7, 3)),
+                                  output((130, 60, 250, 140, .9, 3))])
+        detector = TrafficLightDetector(infer=infer, zoom=((0., 0., 1., 1.),))
+        result = detector.detect(encode(Image.new("RGB", (320, 320), "white")), "png")
+        self.assertEqual(len(result.objects), 1)
+        self.assertAlmostEqual(result.scores[0], .9)
+
+    def test_zoom_regions_use_their_own_lower_confidence(self):
+        infer = Mock(side_effect=[output((130, 60, 250, 140, .45, 3)),
+                                  output((130, 60, 250, 140, .45, 3))])
+        detector = TrafficLightDetector(infer=infer, confidence=.5, zoom_confidence=.35,
+                                        zoom=((0., 0., 1., 1.),))
+        result = detector.detect(encode(Image.new("RGB", (320, 320), "white")), "png")
+        self.assertTrue(result.red)
+        self.assertEqual(result.boxes, ((130, 60, 120, 80),))
+        for bad in (0., 1.1, float("nan")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                TrafficLightDetector(zoom_confidence=bad)
+
+    def test_zoom_regions_are_validated_before_any_inference(self):
+        for bad in ("left", (0., 0., .5, .6), ((0., 0., .5),), ((0., 0., .5, .6),) * 9,
+                    ((-.01, 0., .5, .6),), ((.6, 0., .5, .6),), ((0., .9, .5, .2),),
+                    ((0., 0., .01, .6),), ((0., 0., .5, float("nan")),)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                TrafficLightDetector(zoom=bad)
+        self.assertEqual(parse_zoom_regions(None), ())
+
     def test_invalid_confidence_is_rejected(self):
         for bad in (0., -1., 1.1, float("nan"), float("inf")):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 TrafficLightDetector(confidence=bad)
+
+    def test_red_aspect_window_rejects_tall_or_wide_red_objects(self):
+        frame = encode(Image.new("RGB", (320, 320), "white"))
+        infer = Mock(return_value=output((140, 100, 180, 200, .95, 3)))  # 40x100, h/w 2.5
+        strict = TrafficLightDetector(infer=infer, red_aspect=(.6, 1.6))
+        self.assertFalse(strict.detect(frame, "png").red)
+        infer.return_value = output((140, 100, 180, 140, .95, 3))  # 40x40 lamp
+        self.assertTrue(strict.detect(frame, "png").red)
+        # An empty window keeps the vendor behaviour: every red box counts.
+        infer.return_value = output((140, 100, 180, 200, .95, 3))
+        self.assertTrue(TrafficLightDetector(infer=infer).detect(frame, "png").red)
+        self.assertTrue(TrafficLightDetector(infer=infer, red_aspect=[]).detect(frame, "png").red)
+
+    def test_red_aspect_window_is_validated(self):
+        for bad in ([.6], [.6, 1.6, 1.8], "wide", [1.6, .6], [0., 1.], ["a", 1.5],
+                    [.6, float("nan")]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                TrafficLightDetector(red_aspect=bad)
+        self.assertIsNone(parse_red_aspect(None))
+        self.assertEqual(parse_red_aspect([.6, 1.6]), (.6, 1.6))
+
+    def test_weak_red_candidates_are_rechecked_in_a_square_context_crop(self):
+        frame = encode(Image.new("RGB", (640, 480), "white"))
+        band = output((200, 128, 220, 148, .10, 3))    # only the candidate threshold
+        crop = output((133, 106, 187, 160, .81, 3))    # same lamp, read in context
+        infer = Mock(side_effect=[output(), band, crop])
+        detector = TrafficLightDetector(infer=infer, zoom=((0., 0., .5, .3),),
+                                        zoom_confidence=.35, candidate_confidence=.06)
+        result = detector.detect(frame, "png")
+        self.assertEqual(infer.call_count, 3)
+        self.assertTrue(result.red)
+        self.assertAlmostEqual(result.scores[0], .81)
+        self.assertEqual(result.boxes, ((200, 40, 20, 20),))
+
+    def test_low_scoring_band_boxes_that_are_not_red_are_dropped(self):
+        frame = encode(Image.new("RGB", (640, 480), "white"))
+        infer = Mock(side_effect=[output(), output((200, 128, 220, 148, .10, 5))])
+        detector = TrafficLightDetector(infer=infer, zoom=((0., 0., .5, .3),),
+                                        zoom_confidence=.35, candidate_confidence=.06)
+        result = detector.detect(frame, "png")
+        self.assertEqual(infer.call_count, 2)
+        self.assertFalse(result.red)
+        self.assertEqual(result.objects, ())
+
+    def test_candidate_confidence_must_not_exceed_the_zoom_confidence(self):
+        for bad in (0., -.1, .36, 1., float("inf"), "x"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                TrafficLightDetector(zoom_confidence=.35, candidate_confidence=bad)
+        self.assertAlmostEqual(TrafficLightDetector(zoom_confidence=.35).candidate_confidence, .35)
 
     @unittest.skipUnless(find_spec("openvino"), "optional OpenVINO runtime is not installed")
     def test_packaged_model_runs_on_cpu_without_vendor_source_directory(self):

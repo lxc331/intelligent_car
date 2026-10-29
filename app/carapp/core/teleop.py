@@ -87,6 +87,7 @@ class TeleopController:
             current = self.ctx.state.get("servo_targets") or {}
             limits = self.ctx.cfg["servo"]["limits"]
             actions = self.ctx.cfg["servo"]["actions"]
+            signs = self.ctx.cfg["servo"].get("signs") or {}
             targets = {}
             for joint, delta, fallback in (
                 ("pitch", int("i" in keys) - int("k" in keys), actions["look_down"]),
@@ -94,9 +95,11 @@ class TeleopController:
             ):
                 if not delta:
                     continue
+                # i/j 是"更仰视 / 更左"的方向键；逐车标定可能把数值方向反过来。
                 previous = int(current.get(joint, fallback))
                 lo, hi = limits[joint]
-                value = max(lo, min(hi, previous + delta * 40))
+                step = delta * 40 * int(signs.get(joint, 1))
+                value = max(lo, min(hi, previous + step))
                 if value != previous:
                     targets[joint] = value
             if targets and not self.ctx.publish_servo(targets, .15):
