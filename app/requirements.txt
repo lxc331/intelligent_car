@@ -5,3 +5,4 @@ pyte>=0.8.2,<0.9
 PyYAML>=6,<7
 numpy>=2,<3
 openvino>=2025.4,<2027
+sounddevice>=0.5,<1

@@ -488,7 +488,7 @@ def main(argv=None):
     ap.add_argument("--host", help="临时指定小车地址，覆盖 config/settings.json")
     ap.add_argument("--transport", choices=("wired", "wifi", "sta"), help="连接方式：有线、AP 热点、STA 局域网")
     ap.add_argument("--car", help="车辆档案 ID，例如 HW-A0857935")
-    ap.add_argument("--tab", help="启动选项卡：gripper、remote、cruise、mapping、navigation 或 terminal")
+    ap.add_argument("--tab", help="启动选项卡：gripper、remote、ai、cruise、mapping、navigation 或 terminal")
     args = ap.parse_args(argv)
 
     cfg = load_config()

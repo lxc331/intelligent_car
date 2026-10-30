@@ -73,14 +73,14 @@
     "limits": {
       "pitch": [
         1150,
-        1800
+        2250
       ],
       "yaw": [
         650,
         2350
       ],
       "arm": [
-        1250,
+        1200,
         2000
       ],
       "gripper": [
@@ -89,41 +89,41 @@
       ]
     },
     "signs": {
-      "pitch": -1,
+      "pitch": 1,
       "yaw": 1
     },
     "actions": {
       "open": 2000,
       "close": 1500,
       "half_open": 1750,
-      "arm_up": 1300,
-      "arm_down": 1950,
-      "look_down": 1600,
-      "look_forward": 1450
+      "arm_up": 1200,
+      "arm_down": 1700,
+      "look_down": 1300,
+      "look_forward": 1500
     },
     "presets": {
       "待机（张爪）": {
-        "pitch": 1600,
+        "pitch": 1300,
         "yaw": 1500,
-        "arm": 1900,
+        "arm": 1700,
         "gripper": 2000
       },
       "俯视观察": {
-        "pitch": 1750,
+        "pitch": 1300,
         "yaw": 1500,
-        "arm": 1900,
+        "arm": 1700,
         "gripper": 2000
       },
       "夹取准备": {
-        "pitch": 1780,
+        "pitch": 1300,
         "yaw": 1500,
-        "arm": 1950,
+        "arm": 1700,
         "gripper": 2000
       },
       "抬起持物": {
-        "pitch": 1600,
+        "pitch": 1300,
         "yaw": 1500,
-        "arm": 1300,
+        "arm": 1200,
         "gripper": 1500
       }
     }
@@ -164,7 +164,7 @@
     }
   },
   "cruise": {
-    "detection_distance": 0.5,
+    "detection_distance": 0.35,
     "speed": 0.15,
     "mode": "avoid",
     "scan_angle": 90.0,
@@ -238,10 +238,10 @@
     ],
     "red_frames": 3,
     "red_hold": 1.5,
-    "dip_pitch": 1600,
+    "dip_pitch": 1450,
     "confirm_dip": 1.2,
-    "confirm_pitch": 1380,
-    "restore_pitch": 1450,
+    "confirm_pitch": 1720,
+    "restore_pitch": 1500,
     "confirm_delay": 1.4,
     "confirm_hold": 8.0,
     "confirm_retry": 0.8,
@@ -263,7 +263,7 @@
     "row_intercept": 1.123,
     "row_trigger": 396.0,
     "finish_travel": 0.03,
-    "speed_scale": 1.3,
+    "speed_scale": 1.87,
     "track_pitch": 1450
   },
   "status": {

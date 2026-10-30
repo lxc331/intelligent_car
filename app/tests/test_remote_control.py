@@ -373,8 +373,8 @@ class AppLifecycleTests(unittest.TestCase):
             app.root.withdraw()
             try:
                 app.select_tab('remote'); app.root.update()
-                self.assertEqual([f.key for f in app.features], ['gripper','remote','cruise','mapping','navigation','terminal'])
-                self.assertEqual(len(app.frame_listeners), 8)  # five previews, tracker, mapping/navigation evidence
+                self.assertEqual([f.key for f in app.features], ['gripper','remote','ai','cruise','mapping','navigation','terminal'])
+                self.assertEqual(len(app.frame_listeners), 9)  # six previews, tracker, mapping/navigation evidence
                 def descendants(widget):
                     for child in widget.winfo_children():
                         yield child
