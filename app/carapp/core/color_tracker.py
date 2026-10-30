@@ -11,7 +11,8 @@ COLORS = {"红色": "red", "绿色": "green", "蓝色": "blue", "黄色": "yello
 def detect_color(payload, color="red", previous=None, min_area=24):
     from PIL import Image, ImageChops, ImageFilter
     image = Image.open(io.BytesIO(payload)).convert("RGB")
-    image.thumbnail((320, 240))
+    # Keep small distant objects; normalized coordinates preserve calibrations.
+    image.thumbnail((640, 480))
     width, height = image.size
     h, s, v = image.convert("HSV").split()
     bands = {"red": lambda n: n <= 15 or n >= 240,

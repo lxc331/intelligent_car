@@ -2,6 +2,7 @@
 import math
 import threading
 import time
+from carapp.core.pick_approach import ApproachProgress
 
 MIN_PICK_Y = .50
 
@@ -35,6 +36,7 @@ class VisualServoPolicy:
         self.calibration, self.cfg = calibration, cfg
         self.ready_frames = 0
         self.frame_id = -1
+        self.aligning = False
 
     def decide(self, obs, now):
         cfg, cal = self.cfg, self.calibration
@@ -48,9 +50,14 @@ class VisualServoPolicy:
         if target["y"] > cal["y"] + cfg["overshoot_margin"]:
             raise RuntimeError("目标已越过夹取线，请人工调整位置")
         dx = target["x"]-cal["x"]
-        if abs(dx) > cfg["x_tolerance"]:
+        # Hysteresis prevents alternating steering/forward at the threshold.
+        tolerance = cfg["x_tolerance"] * (.65 if self.aligning else 1.)
+        self.aligning = abs(dx) > tolerance
+        if self.aligning:
             self.ready_frames = 0
             wz = max(-cfg["max_turn"], min(cfg["max_turn"], -dx*cfg["turn_gain"]))
+            minimum = min(cfg["max_turn"], cfg.get("min_turn", .09))
+            wz = math.copysign(max(abs(wz), minimum), wz)
             return "左右对准", 0., wz
         if target["y"] >= cal["y"]-cfg["y_tolerance"]:
             if not .80 <= target["width"]/cal["width"] <= 1.8:
@@ -99,6 +106,7 @@ class VisualPickRunner:
 
     def run(self):
         started, missing_since, last_pose = time.monotonic(), None, None
+        progress = ApproachProgress(self.cfg.get('progress_timeout', 12.))
         distance, phase = 0., None
         try:
             while not self.cancelled.is_set():
@@ -121,6 +129,7 @@ class VisualPickRunner:
                     raise RuntimeError("超过本次最大行驶距离，已停车")
                 obs = self.observe()
                 new_phase, vx, wz = self.policy.decide(obs, now)
+                progress.update(obs.get('target'), vx, now)
                 self.trace({"time": time.time(), "elapsed": now-started, "phase": new_phase,
                             "pose": list(pose), "distance": distance, "vx": vx, "wz": wz,
                             "target": obs.get("target"), "image_age": now-obs.get("seen_at",0),

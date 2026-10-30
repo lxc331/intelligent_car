@@ -1,6 +1,6 @@
 {
   "car": {
-    "host": "192.168.167.118",
+    "host": "192.168.167.136",
     "http_port": 8080,
     "ws_port": 9090,
     "subnet_prefix": "192.168.150",
@@ -8,7 +8,7 @@
       "192.168.150",
       "192.168.149"
     ],
-    "profile_id": "HW-A0857935",
+    "profile_id": "HW-10CCA58E",
     "transport": "sta",
     "sta_ssid": "xiaomi"
   },
@@ -160,6 +160,11 @@
         "version": 2,
         "contact_confirmed": true,
         "reference_image": "D:\\林兴城的文件\\读研\\智慧交通工程中心\\.work\\tracking_pick\\fix_20261023_171344\\user_near_calibration.jpg"
+      }
+    },
+    "preparation_poses": {
+      "HW-10CCA58E": {
+        "arm": 1796
       }
     }
   },

@@ -8,6 +8,7 @@ import tkinter as tk
 
 from carapp.config import save_config, validate_servo_targets
 from carapp.core.color_tracker import COLORS, ColorTracker
+from carapp.core.pick_approach import approach_config
 from carapp.core.visual_pick import VisualPickRunner, validate_calibration, validate_pick_reference
 from carapp.ui import theme
 
@@ -35,6 +36,15 @@ class TrackingPickControls:
         owner._btn(row, "② 两爪间标定", self.calibrate)
         owner._btn(row, "一键追踪夹取", self.start, fg=theme.ACCENT)
         owner._btn(row, "中止追踪", self.cancel, fg=theme.ERR)
+        limits = tk.Frame(box, bg=theme.PANEL)
+        limits.pack(fill='x')
+        tk.Label(limits, text='最大追踪行程（米）', bg=theme.PANEL, fg=theme.TEXT_DIM,
+                 font=theme.FONT_SMALL).pack(side='left')
+        self.distance_var = tk.StringVar(value=str(self.cfg.get('approach_distance', 1.5)))
+        tk.Spinbox(limits, from_=.3, to=3., increment=.1, width=5, textvariable=self.distance_var,
+                   bg=theme.PANEL_2, fg=theme.TEXT).pack(side='left', padx=4)
+        tk.Label(limits, text='1 米目标建议 1.5 米行程；目标需持续可见', bg=theme.PANEL,
+                 fg=theme.TEXT_DIM, font=theme.FONT_SMALL).pack(side='left')
         self.label = tk.Label(box, text="标定时须把目标放在两爪之间；不能用远处目标标定。仅换目标远近时无需重标定。",
                               bg=theme.PANEL, fg=theme.TEXT_DIM, anchor="w", font=theme.FONT_SMALL,
                               wraplength=720, justify="left")
@@ -47,7 +57,13 @@ class TrackingPickControls:
 
     def pose(self):
         actions = self.ctx.cfg["servo"]["actions"]
-        return {"pitch": actions["look_down"], "yaw": 1500, "arm": actions["arm_down"]}
+        pose = {"pitch": actions["look_down"], "yaw": 1500, "arm": actions["arm_down"]}
+        # A measured pickup height belongs to this car's visual preparation,
+        # not to every manual arm-down action or another car's calibration.
+        profile = self.ctx.cfg['car'].get('profile_id')
+        override = self.cfg.get('preparation_poses', {}).get(profile, {}) if profile else {}
+        pose.update({key: override[key] for key in pose if key in override})
+        return validate_servo_targets(self.ctx.cfg, pose)
 
     def calibration(self):
         cal = self.cfg["calibrations"].get(self.key())
@@ -150,6 +166,7 @@ class TrackingPickControls:
             return
         try:
             self.require_camera()
+            run_cfg = approach_config(self.cfg, self.distance_var.get())
             cal = validate_calibration(self.calibration(), self.ctx.cfg["car"]["host"], self.cfg["color"], self.pose())
             validate_servo_targets(self.ctx.cfg, dict(self.pose(), gripper=self.ctx.cfg["servo"]["actions"]["open"]))
             self.owner.stop_wheels()
@@ -167,7 +184,7 @@ class TrackingPickControls:
         self.owner._abort = False
         self.events, self.trace_entries = [], []
         owned_recording = not camera.recording
-        self.runner = VisualPickRunner(self.cfg, cal, self.ctx.cfg["servo"]["actions"],
+        self.runner = VisualPickRunner(run_cfg, cal, self.ctx.cfg["servo"]["actions"],
             self.tracker.snapshot,
             lambda: {"pose": self.ctx.state.get("pose"), "seen_at": self.ctx.state.get("pose_seen_at",0)} if self.ctx.state.get("pose") else None,
             lambda vx,wz: self.ctx.publish_twist(vx,wz,quiet=True), self.ctx.publish_servo,
@@ -194,6 +211,7 @@ class TrackingPickControls:
                     with open(os.path.join(self.record_dir,"运行记录.json"),"w",encoding="utf-8") as f:
                         json.dump({"host":self.ctx.cfg["car"]["host"],"calibration":cal,
                                    "events":self.events,"trace":self.trace_entries,"result":runner.result,
+                                   "approach_limits":{k:run_cfg[k] for k in ('max_distance','max_seconds','max_speed')},
                                    "vehicle_files_modified":[]},f,ensure_ascii=False,indent=2)
                 finally:
                     self.owner._busy = False

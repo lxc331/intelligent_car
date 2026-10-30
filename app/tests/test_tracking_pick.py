@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 from carapp.config import DEFAULTS
 from carapp.core.color_tracker import ColorTracker, detect_color
 from carapp.core.visual_pick import VisualPickRunner, VisualServoPolicy, validate_calibration
+from carapp.core.pick_approach import approach_config, ApproachProgress
 
 
 def observation(x=.45, y=.35, width=.12, frame_id=1, now=None):
@@ -100,6 +101,67 @@ class TrackingTests(unittest.TestCase):
         buf=io.BytesIO();image.save(buf,format='PNG')
         previous={'x':.8,'y':.8,'area':.02}
         self.assertIsNone(detect_color(buf.getvalue(),'red',previous))
+
+    def test_small_far_target_survives_processing(self):
+        image=Image.new('RGB',(640,480),'#777777')
+        ImageDraw.Draw(image).rectangle((310,150,319,159),fill='red')
+        buf=io.BytesIO();image.save(buf,format='PNG')
+        target=detect_color(buf.getvalue(),'red')
+        self.assertIsNotNone(target)
+        self.assertLess(target['width'],.02)
+
+    def test_extended_limits_do_not_mutate_existing_settings(self):
+        before=copy.deepcopy(self.cfg)
+        run=approach_config(self.cfg,1.5)
+        self.assertEqual(self.cfg,before)
+        self.assertEqual(run['max_distance'],1.5)
+        self.assertGreaterEqual(run['max_seconds'],105.)
+        self.assertEqual(run['max_speed'],self.cfg['max_speed'])
+        for value in (float('nan'),0,4):
+            with self.assertRaises(ValueError):approach_config(self.cfg,value)
+
+    def test_turn_hysteresis_and_minimum_command(self):
+        for offset in (.04,.03):
+            phase,vx,wz=self.policy.decide(observation(x=self.cal['x']+offset),time.monotonic())
+            self.assertEqual(phase,'左右对准')
+            self.assertEqual(vx,0.)
+            self.assertGreaterEqual(abs(wz),.09)
+        self.assertEqual(self.policy.decide(observation(x=self.cal['x']+.015),time.monotonic())[0],'接近目标')
+
+    def test_no_progress_stops_but_turning_does_not_consume_forward_budget(self):
+        monitor=ApproachProgress(timeout=1.)
+        target=observation()['target']
+        for i in range(20):monitor.update(target,0,i*.1)
+        with self.assertRaisesRegex(RuntimeError,'未接近'):
+            for i in range(30):monitor.update(target,.04,2+i*.1)
+        monitor=ApproachProgress(timeout=1.)
+        for i in range(30):monitor.update(dict(target,y=.3+i*.01),.04,i*.1)
+
+    def test_one_meter_simulated_closed_loop_reaches_pick_then_lifts(self):
+        cfg=approach_config(self.cfg,1.5)
+        sim={'time':100.,'x':0.,'vx':0.,'frame':0};servos=[]
+        class Clock:
+            def is_set(self):return False
+            def wait(self,seconds):
+                sim['x']+=sim['vx']*seconds;sim['time']+=seconds
+                return False
+        def observe():
+            sim['frame']+=1
+            progress=min(1.,sim['x'])
+            return observation(y=.25+.51*progress,width=.015+.245*progress,
+                               frame_id=sim['frame'],now=sim['time'])
+        def drive(vx,wz):sim['vx']=vx;return True
+        runner=VisualPickRunner(cfg,self.cal,DEFAULTS['servo']['actions'],observe,
+            lambda:dict(pose=(sim['x'],0,0),seen_at=sim['time']),drive,
+            lambda p,d:servos.append((sim['vx'],p)) or True)
+        runner.cancelled=Clock()
+        from unittest.mock import patch
+        with patch('carapp.core.visual_pick.time.monotonic',lambda:sim['time']):runner.run()
+        self.assertIn('动作完成',runner.result)
+        self.assertGreater(sim['x'],.9)
+        self.assertLess(sim['x'],1.1)
+        self.assertEqual([list(p)[0] for _,p in servos],['gripper','arm'])
+        self.assertTrue(all(v==0 for v,p in servos))
 
 
 if __name__=='__main__':
