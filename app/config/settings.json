@@ -1,6 +1,6 @@
 {
   "car": {
-    "host": "192.168.167.136",
+    "host": "192.168.167.118",
     "http_port": 8080,
     "ws_port": 9090,
     "subnet_prefix": "192.168.150",
@@ -10,7 +10,7 @@
     ],
     "profile_id": "HW-10CCA58E",
     "transport": "sta",
-    "sta_ssid": "xiaomi"
+    "sta_ssid": "zte-lab"
   },
   "cars": [
     {
@@ -19,8 +19,8 @@
       "id": "HW-10CCA58E",
       "wifi_host": "192.168.149.1",
       "ssid": "HW-10CCA58E",
-      "sta_host": "192.168.167.136",
-      "sta_ssid": "xiaomi"
+      "sta_host": "192.168.167.118",
+      "sta_ssid": "zte-lab"
     },
     {
       "name": "2 号车",
@@ -28,8 +28,8 @@
       "id": "HW-A0857935",
       "wifi_host": "192.168.149.1",
       "ssid": "HW-A0857935",
-      "sta_host": "192.168.167.118",
-      "sta_ssid": "xiaomi"
+      "sta_host": "192.168.167.136",
+      "sta_ssid": "zte-lab"
     }
   ],
   "base": {
@@ -43,7 +43,8 @@
     "turn_speed": 0.4,
     "publish_hz": 10,
     "pick_forward_sec": 0.6,
-    "pick_backward_sec": 0.4
+    "pick_backward_sec": 0.4,
+    "speed": 0.15
   },
   "camera": {
     "default_topic": "/image_raw",
@@ -136,8 +137,12 @@
     "turn_gain": 1.2,
     "control_hz": 10,
     "x_tolerance": 0.035,
-    "y_tolerance": 0.025,
+    "arrive_margin": 0.0,
     "overshoot_margin": 0.08,
+    "straight_margin": 0.12,
+    "near_align_enter": 0.04,
+    "near_align_exit": 0.015,
+    "close_x_tolerance": 0.02,
     "stable_frames": 3,
     "frame_timeout": 0.6,
     "lost_timeout": 2.0,
@@ -160,10 +165,59 @@
         "version": 2,
         "contact_confirmed": true,
         "reference_image": "D:\\林兴城的文件\\读研\\智慧交通工程中心\\.work\\tracking_pick\\fix_20261023_171344\\user_near_calibration.jpg"
+      },
+      "HW-10CCA58E:192.168.167.136:red": {
+        "x": 0.4654048936073612,
+        "y": 0.8354793470145488,
+        "width": 0.2890625,
+        "host": "192.168.167.136",
+        "color": "red",
+        "pose": {
+          "pitch": 1300,
+          "yaw": 1500,
+          "arm": 1796
+        },
+        "created": "2026-10-30 20:36:32",
+        "version": 2,
+        "contact_confirmed": true
+      },
+      "HW-10CCA58E:red": {
+        "x": 0.4637781579953179,
+        "y": 0.7835900299396429,
+        "width": 0.290625,
+        "host": "HW-10CCA58E",
+        "color": "red",
+        "pose": {
+          "pitch": 1300,
+          "yaw": 1500,
+          "arm": 1796
+        },
+        "created": "2026-10-31 16:53:19",
+        "version": 2,
+        "contact_confirmed": true
+      },
+      "HW-A0857935:red": {
+        "x": 0.5129589145365715,
+        "y": 0.8516298767967145,
+        "width": 0.3234375,
+        "host": "HW-A0857935",
+        "color": "red",
+        "pose": {
+          "pitch": 1300,
+          "yaw": 1500,
+          "arm": 1796
+        },
+        "created": "2026-10-31 17:08:49",
+        "version": 2,
+        "contact_confirmed": true
       }
     },
+    "near_x_tolerance": 0.09,
     "preparation_poses": {
       "HW-10CCA58E": {
+        "arm": 1796
+      },
+      "HW-A0857935": {
         "arm": 1796
       }
     }
@@ -186,7 +240,14 @@
     "serialize": true
   },
   "navigation": {
-    "speed": 0.06
+    "speed": 0.15,
+    "sandbox_pass_cost": 254,
+    "sandbox_footprint": {
+      "front": 0.19,
+      "rear": 0.09,
+      "half": 0.08
+    },
+    "sandbox_verify_path": false
   },
   "traffic_light": {
     "confidence": 0.5,

@@ -31,6 +31,15 @@ def validate_calibration(calibration, host, color, pose):
     return calibration
 
 
+def calibration_problem(calibration, host, color, pose):
+    """Return the blocking reason for a calibration, or "" when it is usable."""
+    try:
+        validate_calibration(calibration, host, color, pose)
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
 class VisualServoPolicy:
     def __init__(self, calibration, cfg):
         self.calibration, self.cfg = calibration, cfg
@@ -50,16 +59,34 @@ class VisualServoPolicy:
         if target["y"] > cal["y"] + cfg["overshoot_margin"]:
             raise RuntimeError("目标已越过夹取线，请人工调整位置")
         dx = target["x"]-cal["x"]
-        # Hysteresis prevents alternating steering/forward at the threshold.
-        tolerance = cfg["x_tolerance"] * (.65 if self.aligning else 1.)
-        self.aligning = abs(dx) > tolerance
+        # Turning in place tilts the camera view and lifts the measured y, which
+        # used to declare the pick line reached while the jaws were still in
+        # front of the block. Finish the last centimetres straight ahead, but
+        # never straight into an off-centre grab: the fingers would close beside
+        # the block instead of around it.
+        near = cal["y"]-target["y"] <= cfg.get("straight_margin", .12)
+        if near:
+            # Hysteresis: commit to turning once clearly off-centre and keep
+            # turning until close again, so the phases do not flip every frame.
+            edge = cfg.get("near_align_exit", .015) if self.aligning else cfg.get("near_align_enter", .04)
+        else:
+            # Hysteresis prevents alternating steering/forward at the threshold.
+            edge = cfg["x_tolerance"] * (.65 if self.aligning else 1.)
+        self.aligning = abs(dx) > edge
+        reached = target["y"] >= cal["y"]-cfg.get("arrive_margin", .0)
+        if reached and not self.aligning and abs(dx) > cfg.get("close_x_tolerance", .02):
+            # At the pick line: centre the block before the fingers close.
+            self.aligning = True
         if self.aligning:
             self.ready_frames = 0
             wz = max(-cfg["max_turn"], min(cfg["max_turn"], -dx*cfg["turn_gain"]))
             minimum = min(cfg["max_turn"], cfg.get("min_turn", .09))
             wz = math.copysign(max(abs(wz), minimum), wz)
             return "左右对准", 0., wz
-        if target["y"] >= cal["y"]-cfg["y_tolerance"]:
+        # The calibrated line is the grasp point measured with the block between
+        # the jaws. Stopping short of it leaves the fingers in front of the
+        # block, which closes on air; creep up to the line instead.
+        if reached:
             if not .80 <= target["width"]/cal["width"] <= 1.8:
                 raise RuntimeError("目标尺寸与标定不符，请重新确认目标和夹取位置")
             if obs["frame_id"] != self.frame_id:
@@ -145,7 +172,8 @@ class VisualPickRunner:
                     self.status(phase)
                 self._drive(vx, wz)
                 if phase == "到达夹取位置":
-                    self.status("停车，闭合夹爪")
+                    self.status("停车，闭合夹爪（到达 y=%.3f / 标定 y=%.3f / 里程 %.2f m）"
+                                % (obs["target"]["y"], self.policy.calibration["y"], distance))
                     if not self._servo({"gripper": self.actions["close"]}, .8):
                         break
                     self.status("抬升夹爪")

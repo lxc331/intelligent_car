@@ -96,11 +96,71 @@ class SandboxTests(unittest.TestCase):
         with self.assertRaises(Exception):remote.follow_path([(0,0,0),(.1,0,0)],project_id='test',intent_epoch=ticket)
         remote.close()
 
+    def test_follow_path_carries_the_requested_margin_setting(self):
+        """The car validates against its live costmap; the page may allow zero
+        margin on purpose, and the uploaded route must say so."""
+        import base64
+
+        def route_payload(remote):
+            chunks=[values for operation,values in remote.operations
+                    if operation=='upload' and values.get('name','').startswith('route_')]
+            return json.loads(b''.join(base64.b64decode(v['chunk']) for v in chunks))
+
+        remote=FakeRemote();remote.start(MAP);remote.operations.clear()
+        remote.follow_path([(0,0,0),(.1,0,0)],project_id='test',pass_cost=254)
+        self.assertEqual(route_payload(remote)['pass_cost'],254)
+        remote.operations.clear()
+        remote.follow_path([(0,0,0),(.1,0,0)],project_id='test',pass_cost=300)
+        self.assertEqual(route_payload(remote)['pass_cost'],254)
+        remote.close()
+        remote=FakeRemote();remote.start(MAP);remote.operations.clear()
+        remote.follow_path([(0,0,0),(.1,0,0)],project_id='test',pass_cost=100)
+        self.assertEqual(route_payload(remote)['pass_cost'],253)
+        remote.close()
+
     def test_road_profile_keeps_separate_localization_map(self):
         params=navigation_parameters({}, {}, '/tmp/test/map.yaml', .04)
         road_parameters(params,'/tmp/test',.04)
         self.assertEqual(params['map_server']['ros__parameters']['yaml_filename'],'/tmp/test/map.yaml')
         self.assertEqual(params['sandbox_mask_server']['ros__parameters']['yaml_filename'],'/tmp/test/keepout.yaml')
         self.assertIn('RegulatedPurePursuit',params['controller_server']['ros__parameters']['FollowPath']['plugin'])
-        for name in ('local_costmap','global_costmap'):
-            self.assertIn('sandbox_keepout',params[name][name]['ros__parameters']['filters'])
+        self.assertIn('sandbox_keepout',params['global_costmap']['global_costmap']['ros__parameters']['filters'])
+        # The mask marks everything off the narrow sandbox road lethal; applying it
+        # to the local costmap aborts the controller on its own footprint, so it
+        # belongs to planning only.
+        self.assertNotIn('filters',params['local_costmap']['local_costmap']['ros__parameters'])
+
+    def test_local_costmap_keeps_room_for_tracking_error(self):
+        params=navigation_parameters({}, {}, '/tmp/test/map.yaml', .04)
+        road_parameters(params,'/tmp/test',.04)
+        local=params['local_costmap']['local_costmap']['ros__parameters']['inflation_layer']
+        global_=params['global_costmap']['global_costmap']['ros__parameters']['inflation_layer']
+        self.assertLessEqual(local['inflation_radius'],.15)
+        self.assertGreaterEqual(global_['inflation_radius'],.20)
+
+    def test_route_paths_round_corners_so_the_controller_does_not_stall(self):
+        """A raw waypoint polyline jumps in heading, which makes the pure-pursuit
+        controller crawl or wobble at every node; the submitted path must turn
+        smoothly and stay inside the corridor."""
+        from carapp.core.navigation_path import checked_path, rounded_path
+        vertices=[(0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(2.,1.,0.)]
+        path=checked_path(rounded_path(vertices,radius=.2))
+        self.assertEqual(path[0][:2],(0.,0.))
+        self.assertEqual(path[-1][:2],(2.,1.))
+        self.assertTrue(all(math.dist(a[:2],b[:2])<=.15 for a,b in zip(path,path[1:])))
+        # The right-angle corner is cut: no sample sits on the original vertex.
+        self.assertGreater(min(math.dist(point[:2],(1.,0.)) for point in path),.04)
+        # Heading changes stay small between neighbouring samples.
+        turns=[abs(math.atan2(math.sin(b[2]-a[2]),math.cos(b[2]-a[2])))
+               for a,b in zip(path,path[1:]) if math.dist(a[:2],b[:2])>.004]
+        self.assertLess(max(turns),.6)
+
+    def test_controller_keeps_a_long_enough_lookahead_and_fast_corner_turns(self):
+        """Short lookahead + a wide rotate-in-place dead band is what made the car
+        weave on straights and idle at every corner."""
+        params=navigation_parameters({}, {}, '/tmp/test/map.yaml', .04)
+        road_parameters(params,'/tmp/test',.04)
+        follow=params['controller_server']['ros__parameters']['FollowPath']
+        self.assertGreaterEqual(follow['lookahead_dist'],.15)
+        self.assertLessEqual(follow['rotate_to_heading_min_angle'],.2)
+        self.assertGreaterEqual(follow['rotate_to_heading_angular_vel'],.4)

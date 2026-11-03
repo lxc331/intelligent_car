@@ -81,6 +81,7 @@ class NavigationRemote(MappingRemote):
         self._lease_exists = False
         self._heartbeat_done = threading.Event()
         self._heartbeat_thread = None
+        self._heartbeat_misses = 0
         self._prepared = False
         self._clock_offset = None
 
@@ -136,20 +137,35 @@ class NavigationRemote(MappingRemote):
             self._motion_allowed = False
             return self._intent_epoch
 
+    def _heartbeat_round(self):
+        """Renew the motion lease once; tolerate short Wi-Fi hiccups.
+
+        One dropped renewal must not cancel a running navigation: the lease is
+        two seconds long, so up to three misses can still be recovered before
+        the car latches motion off by itself.
+        """
+        try:
+            self._remote('heartbeat',timeout=1.5,**self._intent())
+            self._heartbeat_misses = 0
+            return True
+        except Exception:
+            self._heartbeat_misses = getattr(self,'_heartbeat_misses',0)+1
+            if self._heartbeat_misses>=3:
+                # Do not silently grant a previous goal after a successful
+                # later heartbeat. The next explicit goal needs a new epoch.
+                self._heartbeat_misses = 0
+                self._disallow()
+            return False
+
     def _start_heartbeat(self):
         self._heartbeat_done.clear()
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             return
         def run():
-            while not self._heartbeat_done.wait(.4):
+            while not self._heartbeat_done.wait(.1 if getattr(self,'_heartbeat_misses',0) else .3):
                 if not self._lease_exists:
                     continue
-                try:
-                    self._remote('heartbeat',timeout=3,**self._intent())
-                except Exception:
-                    # Do not silently grant a previous goal after a successful
-                    # later heartbeat. The next explicit goal needs a new epoch.
-                    self._disallow()
+                self._heartbeat_round()
         self._heartbeat_thread = threading.Thread(target=run,name='navigation-lease',daemon=True)
         self._heartbeat_thread.start()
 
@@ -248,10 +264,12 @@ class NavigationRemote(MappingRemote):
             return self._remote('plan',values=values,epoch=self.capture_intent(),
                                 request_timeout=18,timeout=21)
 
-    def follow_path(self, points, *, project_id, intent_epoch=None):
+    def follow_path(self, points, *, project_id, intent_epoch=None, pass_cost=253, verify_path=False):
         from carapp.core.navigation_path import checked_path
         points=checked_path(points)
-        raw=json.dumps(dict(points=points,project_id=project_id),allow_nan=False).encode()
+        pass_cost=max(253,min(254,int(pass_cost)))
+        raw=json.dumps(dict(points=points,project_id=project_id,pass_cost=pass_cost,verify_path=bool(verify_path)),
+                       allow_nan=False).encode()
         with self._lock:
             ticket=self.capture_intent() if intent_epoch is None else intent_epoch
             name='route_'+uuid.uuid4().hex+'.json'

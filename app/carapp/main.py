@@ -18,13 +18,16 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
-from carapp.config import load_config, save_config  # noqa: E402
+from carapp.config import apply_calibration, load_config, normalize_servo_config, save_config  # noqa: E402
 from carapp.core.camera import CameraStream  # noqa: E402
 from carapp.core.discovery import scan as scan_net  # noqa: E402
 from carapp.core.rosbridge import RosBridge  # noqa: E402
 from carapp.core.realtime_ros import RealtimeRosDelivery  # noqa: E402
 from carapp.core.connection import diagnose, require_wifi, search_prefixes  # noqa: E402
-from carapp.core.connection_profiles import plan_connection, apply_connection  # noqa: E402
+from carapp.core.connection_profiles import (apply_connection, get_profile, plan_connection,
+                                             TRANSPORT_LABELS)  # noqa: E402
+from carapp.core.credentials import local_password  # noqa: E402
+from carapp.core.vehicle_identity import verify_vehicle_identity  # noqa: E402
 from carapp.features import FEATURES  # noqa: E402
 from carapp.features.base import AppContext  # noqa: E402
 from carapp.features.traffic_light import TrafficLightControl  # noqa: E402
@@ -72,6 +75,9 @@ class App:
         self._active_feature = None
         self._had_window_focus = False
         self._focus_timer = None
+        # Tk 回调里的异常默认只打到控制台；run.bat 窗口被挡住时看起来就是
+        # “点了没反应”。统一转进日志面板，现场才能看到原因。
+        self.root.report_callback_exception = self._report_ui_error
 
         self.traffic_light = TrafficLightControl(self.ctx)
 
@@ -113,9 +119,33 @@ class App:
 
         self.log("配置：%s" % os.path.join(APP_DIR, "config", "settings.json"))
         self.log("图像模式：%s" % ("JPEG/Pillow" if HAS_PIL else "PNG/Tk 原生"))
+        self.log("车辆档案：%s" % self.vehicle_label())
+
+    def vehicle_label(self):
+        """Human-readable identity of the vehicle we are configured to drive."""
+        car = self.cfg["car"]
+        profile = get_profile(self.cfg, car.get("profile_id"))
+        name = ("%s %s" % (profile.get("name"), profile.get("id"))) if profile else "手动地址（未选车辆档案）"
+        return "%s · %s · %s" % (name, TRANSPORT_LABELS.get(car.get("transport"), ""), car["host"])
 
     def log(self, msg):
-        self._log_queue.put(str(msg))
+        text = str(msg)
+        self._log_queue.put(text)
+        # 设了 CARAPP_LOG_FILE 时同时落盘，方便远程/事后排查界面里一闪而过的提示。
+        path = os.environ.get("CARAPP_LOG_FILE")
+        if path:
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(time.strftime("%H:%M:%S ") + text + "\n")
+            except OSError:
+                pass
+
+    def _report_ui_error(self, exc_type, exc, tb):
+        """把界面回调里未捕获的异常也写进日志面板，避免静默失败。"""
+        import traceback
+
+        sys.stderr.write("".join(traceback.format_exception(exc_type, exc, tb)))
+        self.log("界面操作出错：%s: %s" % (exc_type.__name__, exc))
 
     def _post(self, callback, *args):
         if not self._closing:
@@ -158,6 +188,45 @@ class App:
             connection_guard=self._connection_guard(),
         )
         self.bridge.start()
+        self._start_identity_check()
+
+    # ---------------- 车辆身份核对 ----------------
+    def _start_identity_check(self):
+        """Ask the car itself who it is, without blocking the UI thread."""
+        car = dict(self.cfg["car"])
+        profile = get_profile(self.cfg, car.get("profile_id"))
+        target = {"host": car.get("host", ""),
+                  "name": (profile or {}).get("name", ""),
+                  "profile_id": (profile or {}).get("id", "")}
+        terminal = self.cfg.get("terminal") or {}
+        credentials = {"username": terminal.get("username") or "pi",
+                       "port": int(terminal.get("port") or 22),
+                       "password": local_password(),
+                       "known_hosts": os.path.join(APP_DIR, "config", "ssh_known_hosts")}
+        generation = self._connection_generation
+
+        def worker():
+            result = verify_vehicle_identity(
+                target["host"], credentials["username"], credentials["password"],
+                port=credentials["port"], known_hosts=credentials["known_hosts"])
+            self._post(self._identity_checked, generation, target, result)
+
+        threading.Thread(target=worker, name="vehicle-identity", daemon=True).start()
+
+    def _identity_checked(self, generation, target, result):
+        if self._closing or generation != self._connection_generation:
+            return
+        identity = result.get("identity") or ""
+        expected = target.get("profile_id") or ""
+        if not result.get("ok"):
+            # 没有密码 / 没有主机密钥 / SSH 不通时保持安静，不干扰正常连接。
+            return
+        self.state.update(vehicle_identity=identity, vehicle_identity_ok=identity == expected)
+        if expected and identity != expected:
+            self.log("⚠ 车辆身份不符：连到的是 %s，当前档案是 %s %s；"
+                     "自动动作前请先核对车辆与连接地址" % (identity, target.get("name") or "", expected))
+        else:
+            self.log("车辆身份核对通过：%s" % identity)
 
     def _receive_ros_message(self, generation, topic, msg):
         # Timestamp at receipt, before any wait. Sensor callbacks never touch Tk.
@@ -299,13 +368,16 @@ class App:
             if hasattr(feature,"on_vehicle_change"):
                 feature.on_vehicle_change()
         apply_connection(self.cfg, plan)
+        # 两台车的云台方向/限位相反，切车后必须换成本车的标定，否则会沿用
+        # 上台车的动作值，把云台顶到另一台车的机械限位。
+        normalize_servo_config(apply_calibration(self.cfg))
         save_config(self.cfg)
         self.state.update(ws_connected=False, cam_size=None, node_count=None,
                           battery_mv=None, pose=None, pose_seen_at=0, servo_targets={}, gripper_target=None,
                           base_cmd=(0.0, 0.0), base_vy=0.0, ws_detail="正在连接")
         self._connection_notice = None
         self.topbar.sync_selection()
-        self.log("切换小车地址：%s" % host)
+        self.log("切换小车：%s" % self.vehicle_label())
         self._start_bridge()
         self.start_camera(self.cam_topic or self.cfg["camera"]["default_topic"])
         return True

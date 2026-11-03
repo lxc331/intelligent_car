@@ -3,6 +3,11 @@ setlocal
 title 小车控制台 · ClawPi
 cd /d "%~dp0"
 
+rem ===== 建图遥控初始速度（m/s） =====
+rem 建图页还没保存过速度时，用它作为初始值，范围 0.02-0.10。
+rem 建图页里直接改速度会自动记住，以界面里选的为准；删掉这行用默认 0.04。
+if not defined CARAPP_MAP_SPEED set "CARAPP_MAP_SPEED=0.05"
+
 set "PYEXE="
 for %%C in (py python python3) do if not defined PYEXE where %%C >nul 2>nul && set "PYEXE=%%C"
 if not defined PYEXE goto NOPY

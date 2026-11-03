@@ -8,6 +8,7 @@ from tkinter import filedialog
 from carapp.config import APP_DIR
 from carapp.core.map_data import MapModel
 from carapp.core.sandbox_project import load_project
+from carapp.config import sandbox_footprint
 from carapp.core.sandbox_route import plan_route
 from carapp.ui.sandbox_registration import SandboxRegistration
 from carapp.ui import theme
@@ -62,11 +63,16 @@ class SandboxNavigation:
         f=self.feature;f._install_map(project.localization,model)
         self.project=project;self._blocked.clear();self.route=None
         f._install_network(project.network,project.path.parent/'road_network.yaml')
+        if getattr(f,'editor',None) is not None and f.editor.project.path!=project.path:
+            f.editor=None;f._edit_selected=None
+        f._update_edit_bar()
         self.text='已配准工程 | RMS %.1fcm | 25cm窄道%s'%(project.registration.rms*100,'开放' if project.metadata['narrow_enabled'] else '封闭')
         f._notice('工程已绑定：实测定位图 + 道路范围 + 九路口路网。实车从当前确认位置接入路网。')
 
     def reset(self):
         self.stop();self.project=None;self.route=None;self._blocked.clear()
+        f=self.feature
+        if getattr(f,'editor',None) is not None:f.editor=None;f._edit_selected=None
         self.text='沙盘道路模式：请导入已配准工程。'
 
     def stop(self):
@@ -89,7 +95,10 @@ class SandboxNavigation:
         if launch:f._stop_requested=False
         project=self.project;goal=f.goal_node.id;blocked=tuple(self._blocked)
         def work():
-            try:self.events.put((epoch,'route',(plan_route(project,start,goal,blocked=blocked),start),None))
+            footprint=sandbox_footprint(f.ctx.cfg)
+            f._notice('沙盘导航：车体判定 %.2f×%.2f m（前 %.2f / 后 %.2f / 半宽 %.2f）' % (
+                footprint[0]+footprint[1], footprint[2]*2, footprint[0], footprint[1], footprint[2]))
+            try:self.events.put((epoch,'route',(plan_route(project,start,goal,blocked=blocked,footprint=footprint),start),None))
             except Exception as exc:self.events.put((epoch,'route',None,str(exc)))
         threading.Thread(target=work,name='sandbox-road-plan',daemon=True).start()
         f._notice('正在检查道路宽度、整车扫掠区域并计算最短路网路径…')
@@ -130,7 +139,9 @@ class SandboxNavigation:
                 snapshot=f.model.snapshot();current=snapshot.get('pose')
                 if f._stop_requested or not f._ready() or not current or snapshot.get('pose_stale') or math.dist(start[:2],current[:2])>.04 or abs(math.atan2(math.sin(start[2]-current[2]),math.cos(start[2]-current[2])))>.2:
                     f._notice('规划期间位置或控制许可变化，请重新开始导航。',True);continue
-                if f.session.submit('follow_path',route.points,project_id=self.project.metadata['id']):self._running=True
+                cost=max(253,min(254,int(f.ctx.cfg.get('navigation',{}).get('sandbox_pass_cost',254))))
+                if f.session.submit('follow_path',route.points,project_id=self.project.metadata['id'],pass_cost=cost,
+                    verify_path=bool(f.ctx.cfg.get('navigation',{}).get('sandbox_verify_path',False))):self._running=True
                 else:f._notice('路径未提交，请等待停车/服务操作完成后重试。',True)
 
     def on_tick(self):self.label.config(text=self.text)

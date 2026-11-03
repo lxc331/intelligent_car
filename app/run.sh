@@ -3,6 +3,9 @@
 set -e
 cd "$(dirname "$0")"
 
+# 建图遥控默认速度（m/s，0.02-0.10）；已设置则沿用，不设置用 0.05。
+export CARAPP_MAP_SPEED="${CARAPP_MAP_SPEED:-0.05}"
+
 PY=""
 for c in python3 python; do
     if command -v "$c" >/dev/null 2>&1; then

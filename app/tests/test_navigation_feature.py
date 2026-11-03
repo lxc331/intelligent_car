@@ -156,6 +156,36 @@ class NavigationFeatureTests(unittest.TestCase):
         self.feature.monitor.snapshot.return_value["received_at"] -= 5.
         self.assertFalse(self.feature._ready())
 
+    def test_initial_pose_failure_keeps_the_session_alive(self):
+        self.feature._handle_event(dict(operation="initial_pose", result={}, error="地图与定位服务尚未激活", target=self.feature.goal))
+        self.assertTrue(self.feature.engaged)
+        self.assertFalse(self.session.cancels)
+        self.assertIn("标定位置未提交", self.feature._status_text)
+        self.feature._handle_event(dict(operation="initial_pose", result=dict(queued=True), error=None))
+        self.assertIn("排队", self.feature._status_text)
+
+    def test_missing_conditions_are_named_so_the_start_button_explains_itself(self):
+        self.assertEqual(self.feature.ready_blockers(), [])
+        self.session.state["running"] = False
+        self.assertIn("导航定位未启动", " ".join(self.feature.ready_blockers()))
+        self.session.state.update(running=True, ready=False)
+        self.assertIn("车端定位未就绪", " ".join(self.feature.ready_blockers()))
+        self.session.state["ready"] = True
+        self.feature._record = None
+        self.assertIn("导航录像未开始", " ".join(self.feature.ready_blockers()))
+        self.feature._record = types.SimpleNamespace(camera=self.camera, event=Mock(), frame=Mock(), finish=Mock())
+        self.feature.monitor.snapshot.return_value["received_at"] -= 5.
+        self.assertIn("雷达数据未就绪", " ".join(self.feature.ready_blockers()))
+        self.feature.monitor.snapshot.return_value["received_at"] = time.monotonic()
+        self.feature._show_ready_hint()
+        self.assertEqual(self.feature.ready_label.cget("text"), "")
+        self.feature._record = None
+        self.feature._show_ready_hint()
+        self.assertIn("开始导航暂不可用", self.feature.ready_label.cget("text"))
+        self.feature.goal = None
+        self.feature._show_ready_hint()
+        self.assertIn("先", self.feature.ready_label.cget("text"))
+
     def test_hidden_page_maintains_permission_and_does_not_render(self):
         self.feature.on_deactivate()
         self.session.state["motion_active"] = True

@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import math
 from carapp.core.road_network import RoadNetwork,RoadNode
-from carapp.core.navigation_path import interpolate,swept_clear
+from carapp.core.navigation_path import interpolate,rounded_path,swept_clear
 
 
 @dataclass(frozen=True)
@@ -13,8 +13,12 @@ class RoadRoute:
     length: float
 
 
-def plan_route(project,current,goal,*,blocked=(),max_entry=.25):
+MAX_EDGE_MIN_WIDTH=.20
+
+def plan_route(project,current,goal,*,blocked=(),max_entry=.25,footprint=None):
     source=project.network;keepout=project.keepout.grid;observed=project.localization.grid
+    footprint=tuple(footprint or project.metadata.get('footprint') or (.20,.10,.09))
+    min_width=max(MAX_EDGE_MIN_WIDTH,2.*footprint[2]+.02)
     disabled=set() if project.metadata['narrow_enabled'] else set(project.metadata['narrow_nodes'])
     blocked=set(tuple(edge) for edge in blocked)
     nodes=[]
@@ -22,10 +26,10 @@ def plan_route(project,current,goal,*,blocked=(),max_entry=.25):
         targets=[]
         for target in node.to:
             if node.id in disabled or target in disabled or (node.id,target) in blocked:continue
-            if project.metadata['edge_widths'].get('%d:%d'%(node.id,target),0.) < .23:continue
+            if project.metadata['edge_widths'].get('%d:%d'%(node.id,target),0.) < min_width:continue
             other=source.node(target);yaw=math.atan2(other.y-node.y,other.x-node.x)
             path=((node.x,node.y,yaw),(other.x,other.y,yaw))
-            if swept_clear(keepout,path) and swept_clear(observed,path):targets.append(target)
+            if swept_clear(keepout,path,footprint) and swept_clear(observed,path,footprint):targets.append(target)
         nodes.append(RoadNode(node.id,node.x,node.y,node.yaw,tuple(targets),node.name))
     graph=RoadNetwork(nodes)
     candidates=[]
@@ -39,8 +43,8 @@ def plan_route(project,current,goal,*,blocked=(),max_entry=.25):
             try:ids=graph.shortest_path(target,goal)
             except ValueError:continue
             vertices=[current,projection]+[(graph.node(i).x,graph.node(i).y,0.) for i in ids]
-            path=interpolate(vertices)
-            if not swept_clear(keepout,path) or not swept_clear(observed,path):continue
+            path=rounded_path(vertices)
+            if not swept_clear(keepout,path,footprint) or not swept_clear(observed,path,footprint):continue
             distance=sum(math.dist(a[:2],b[:2]) for a,b in zip(path,path[1:]))
             edges=((first.id,target),)+tuple(zip(ids,ids[1:]))
             candidates.append(RoadRoute(path,(first.id,)+ids,edges,distance))

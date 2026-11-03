@@ -9,7 +9,8 @@ import tkinter as tk
 from carapp.config import save_config, validate_servo_targets
 from carapp.core.color_tracker import COLORS, ColorTracker
 from carapp.core.pick_approach import approach_config
-from carapp.core.visual_pick import VisualPickRunner, validate_calibration, validate_pick_reference
+from carapp.core.visual_pick import (VisualPickRunner, calibration_problem,
+                                     validate_calibration, validate_pick_reference)
 from carapp.ui import theme
 
 
@@ -45,15 +46,24 @@ class TrackingPickControls:
                    bg=theme.PANEL_2, fg=theme.TEXT).pack(side='left', padx=4)
         tk.Label(limits, text='1 米目标建议 1.5 米行程；目标需持续可见', bg=theme.PANEL,
                  fg=theme.TEXT_DIM, font=theme.FONT_SMALL).pack(side='left')
-        self.label = tk.Label(box, text="标定时须把目标放在两爪之间；不能用远处目标标定。仅换目标远近时无需重标定。",
+        self.label = tk.Label(box, text="标定：目标要推到两个夹爪的根部（合上夹爪能夹住它），不能只放在爪尖之间或远处；"
+                                        "标定后跟车会一直走到这条夹取线才合爪。仅换目标远近时无需重标定。",
                               bg=theme.PANEL, fg=theme.TEXT_DIM, anchor="w", font=theme.FONT_SMALL,
                               wraplength=720, justify="left")
         self.label.pack(fill="x", pady=(3,0))
 
+    def car_identity(self):
+        """Who the calibration belongs to: the vehicle, not the address we reach it on."""
+        car = self.ctx.cfg["car"]
+        return car.get("profile_id") or car["host"]
+
     def key(self):
         car = self.ctx.cfg["car"]
-        # 两台车的热点 IP 相同，不能共享夹取标定。
-        return (car.get("profile_id") or "manual")+":"+car["host"]+":"+self.cfg["color"]
+        profile, color = car.get("profile_id"), self.cfg["color"]
+        if profile:
+            # 夹取标定属于这台车本身：有线、自带热点、STA 连的是同一副机械。
+            return profile+":"+color
+        return "manual:"+car["host"]+":"+color
 
     def pose(self):
         actions = self.ctx.cfg["servo"]["actions"]
@@ -66,11 +76,33 @@ class TrackingPickControls:
         return validate_servo_targets(self.ctx.cfg, pose)
 
     def calibration(self):
-        cal = self.cfg["calibrations"].get(self.key())
+        calibrations = self.cfg["calibrations"]
         car = self.ctx.cfg["car"]
-        if cal is None and car.get("transport") != "wifi":
-            # 兼容原来的有线标定；共享热点的旧标定无法区分车辆，需重新做。
-            cal = self.cfg["calibrations"].get(car["host"]+":"+self.cfg["color"])
+        identity, host, color = self.car_identity(), car["host"], self.cfg["color"]
+        # 旧版本把地址也写进键；这台车换过接入地址或连接方式时，用档案里保存的
+        # 各个地址都试着找一遍，不必重新标定。
+        profile = next((p for p in self.ctx.cfg.get("cars", [])
+                        if p.get("id") == car.get("profile_id")), {})
+        keys = [self.key()]
+        if car.get("profile_id"):
+            keys.append(identity+":"+host+":"+color)
+        keys.append(host+":"+color)
+        for endpoint in (profile.get("host"), profile.get("sta_host"),
+                         None if car.get("transport") == "wifi" else profile.get("wifi_host")):
+            if endpoint:
+                keys.extend([identity+":"+endpoint+":"+color, endpoint+":"+color])
+        cal = None
+        for key in dict.fromkeys(keys):
+            cal = calibrations.get(key)
+            if cal:
+                break
+        endpoints = {str(value) for value in (host, profile.get("host"), profile.get("sta_host"))
+                     if value}
+        if car.get("transport") != "wifi" and profile.get("wifi_host"):
+            endpoints.add(str(profile["wifi_host"]))
+        if cal and cal.get("host") != identity and cal.get("host") in endpoints:
+            # 旧标定存的是地址；迁移成车辆身份后再校验。
+            cal = dict(cal, host=identity)
         return cal
 
     def on_frame(self, timestamp, payload, mode):
@@ -115,7 +147,7 @@ class TrackingPickControls:
                 return
             self.prepared_at = time.monotonic()
             self.tracker.reset()
-            self.status("视觉准备：保持姿态，把目标放在可夹位置，等识别框稳定后标定")
+            self.status("视觉准备：把目标推到两个张开夹爪的最里面（贴住夹爪根部，不是只放在爪子前端），等识别框稳定后标定")
         except ValueError as exc:
             self.ctx.log(str(exc))
 
@@ -135,7 +167,7 @@ class TrackingPickControls:
             target = obs["target"]
             validate_pick_reference(target)
             cal = dict((k,target[k]) for k in ("x","y","width"))
-            cal.update(host=self.ctx.cfg["car"]["host"], color=self.cfg["color"], pose=self.pose(),
+            cal.update(host=self.car_identity(), color=self.cfg["color"], pose=self.pose(),
                        created=time.strftime("%Y-%m-%d %H:%M:%S"), version=2, contact_confirmed=True)
             self.cfg["calibrations"][self.key()] = cal
             save_config(self.ctx.cfg)
@@ -144,6 +176,8 @@ class TrackingPickControls:
                 with open(os.path.join(path, "标定_%s.jpg" % time.strftime("%Y%m%d_%H%M%S")), "wb") as f:
                     f.write(self.tracker.last_payload)
             self.status("标定已保存；保持相机姿态，将同一目标放远后点一键追踪夹取")
+            self.ctx.log("追踪夹取：夹取线 x=%.3f y=%.3f width=%.3f（合爪位置须与此一致）"
+                         % (cal["x"], cal["y"], cal["width"]))
         except ValueError as exc:
             self.ctx.log(str(exc))
 
@@ -158,6 +192,14 @@ class TrackingPickControls:
                 f.write(self.tracker.last_payload)
 
     def start(self):
+        self.ctx.log("追踪夹取：收到启动请求")
+        try:
+            self._start()
+        except Exception as exc:
+            # 界面回调里抛异常只会进控制台，现场看起来就是“点了没反应”。
+            self.ctx.log("追踪夹取启动失败：%s: %s" % (type(exc).__name__, exc))
+
+    def _start(self):
         if self.ctx.motion_in_use(exclude=self.owner):
             self.ctx.log("其他功能正在占用底盘，请先点击顶部「停止全部」")
             return
@@ -167,18 +209,24 @@ class TrackingPickControls:
         try:
             self.require_camera()
             run_cfg = approach_config(self.cfg, self.distance_var.get())
-            cal = validate_calibration(self.calibration(), self.ctx.cfg["car"]["host"], self.cfg["color"], self.pose())
+            cal = validate_calibration(self.calibration(), self.car_identity(), self.cfg["color"], self.pose())
             validate_servo_targets(self.ctx.cfg, dict(self.pose(), gripper=self.ctx.cfg["servo"]["actions"]["open"]))
             self.owner.stop_wheels()
             if self.owner._motion_thread and self.owner._motion_thread.is_alive():
                 raise ValueError("请等待手动运动停止")
         except ValueError as exc:
-            self.ctx.log(str(exc))
+            text = str(exc)
+            self.ctx.log(text)
+            if "标定" in text:
+                self.ctx.log("追踪夹取：这台车还没有可用的夹取标定，车轮不会动。"
+                             "顺序：①视觉准备 → 把目标放到张开的两爪之间 → ②两爪间标定 → 一键追踪夹取")
             return
         camera = self.ctx.app.camera
         if camera is None:
             self.ctx.log("摄像头未启动，不能开始追踪")
             return
+        self.ctx.log("追踪夹取：开始追踪，标定线 y=%.3f（目标 y 到线才合爪；最后 %.0f%% 画面高度只直行）"
+                     % (cal["y"], run_cfg.get("straight_margin", .12) * 100))
         self.record_dir = self.ctx.save_dir("追踪夹取/"+time.strftime("%Y%m%d_%H%M%S"))
         self.owner._busy = True
         self.owner._abort = False
@@ -237,12 +285,13 @@ class TrackingPickControls:
             self.background_tick(state)
         target, cal = state.get("tracking_target"), state.get("tracking_calibration")
         suffix = ("目标 x=%.2f y=%.2f" % (target["x"],target["y"])) if target else "未发现稳定目标"
-        try:
-            validate_calibration(cal,self.ctx.cfg["car"]["host"],self.cfg["color"],self.pose())
+        problem = calibration_problem(cal,self.car_identity(),self.cfg["color"],self.pose())
+        if problem:
+            calibration_text = "标定不可用（%s）" % problem
+        else:
             calibration_text = "已标定，夹取线 y=%.2f" % cal["y"]
-        except ValueError:
-            calibration_text = "标定无效：目标放两爪之间后重标定"
-        self.label.config(text="%s；%s；%s" % (state.get("tracking_phase") or "等待操作",suffix,calibration_text))
+        self.label.config(text="%s；%s；%s" % (state.get("tracking_phase") or "等待操作",suffix,calibration_text),
+                          fg=theme.ERR if problem else theme.TEXT_DIM)
 
     def close(self):
         self.cancel()

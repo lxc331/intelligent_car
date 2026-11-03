@@ -3,6 +3,8 @@ import math
 import os
 from pathlib import Path
 import queue
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -13,6 +15,7 @@ from carapp.config import APP_DIR, save_config
 from carapp.core.credentials import local_password
 from carapp.core.laser_scan import LaserMonitor
 from carapp.core.map_data import MapModel
+from carapp.core.network_editor import NetworkEditor
 from carapp.core.navigation_map import load_navigation_map, valid_target
 from carapp.core.navigation_record import NavigationRecord
 from carapp.core.navigation_remote import NavigationRemote
@@ -23,6 +26,7 @@ from carapp.features.sandbox_navigation import SandboxNavigation
 from carapp.ui import theme
 from carapp.ui.mapping_camera import MappingCamera
 from carapp.ui.navigation_map import NavigationMapPanel
+from carapp.ui.speedpicker import SpeedPicker
 
 ROAD_SNAP = .5   # metres: click-to-node tolerance when picking road nodes
 
@@ -62,6 +66,8 @@ class NavigationFeature(Feature):
         self._status_text = "导入已保存的 map.yaml，再连接并启动定位；点选目标后开始导航。"
         self._status_error = False
         self.sandbox = SandboxNavigation(self)
+        self.editor = None
+        self._edit_selected = None
 
     @property
     def motion_active(self):
@@ -105,27 +111,44 @@ class NavigationFeature(Feature):
         row.pack(fill="x", pady=2)
         self.mode = tk.StringVar(value="goal")
         for label, value in (("标记起点（路网）", "start"), ("标记目标", "goal"),
-                             ("标定当前位置 / 朝向", "initial"), ("平移地图", "pan")):
+                             ("标定当前位置 / 朝向", "initial"), ("平移地图", "pan"),
+                             ("人工路网（点节点+连线）", "network")):
             tk.Radiobutton(row, text=label, variable=self.mode, value=value,
-                           command=lambda: self.map_panel.set_mode(self.mode.get()),
+                           command=self._mode_changed,
                            bg=theme.PANEL, fg=theme.TEXT, selectcolor=theme.BG,
                            activebackground=theme.PANEL, font=theme.FONT_SMALL).pack(side="left")
         self._button(row, "导入路网（YAML）", self.import_road_network)
-        tk.Label(row, text="速度（m/s）", bg=theme.PANEL, fg=theme.TEXT_DIM).pack(side="left", padx=(8, 2))
-        self.speed = tk.StringVar(value=str(self.ctx.cfg.get("navigation", {}).get("speed", .06)))
-        tk.Spinbox(row, textvariable=self.speed, from_=.02, to=.15, increment=.01,
-                   format="%.2f", width=5, bg=theme.PANEL_2, fg=theme.TEXT,
-                   buttonbackground=theme.PANEL_2, relief="flat").pack(side="left")
-        self.btn_plan = self._button(row, "仅规划路径", self.plan)
-        self.btn_navigate = self._button(row, "▶ 开始导航", self.navigate, theme.OK)
-        self._button(row, "■ 停止导航", self.stop_all, theme.ERR)
+        self._button(row, "路网标注器…", self.open_road_editor)
+        # 运动相关控件单独一行：模式/工程按钮再多，也不会把「开始导航」挤出窗口。
+        actions = tk.Frame(panel, bg=theme.PANEL)
+        actions.pack(fill="x", pady=(2, 0))
+        self.speed_picker = SpeedPicker(actions, label="速度（m/s）", low=.02, high=.15,
+                                        value=float(self.ctx.cfg.get("navigation", {}).get("speed", .06)),
+                                        presets=(.03, .06, .10, .15))
+        self.speed_picker.pack(side="left", padx=(0, 6))
+        self.speed = self.speed_picker.var
+        self.btn_plan = self._button(actions, "仅规划路径", self.plan)
+        self.btn_navigate = self._button(actions, "▶ 开始导航", self.navigate, theme.OK)
+        self._button(actions, "■ 停止导航", self.stop_all, theme.ERR)
         self.hint = tk.Label(panel, text="先结束建图。标定或目标模式：左键点选位置，按住拖动设置朝向；右键拖动平移，滚轮缩放。"
+                 "“人工路网”模式：左键点空处加节点、点两个节点连边；改完点“保存路网”写回工程。"
                  "导航期间切页可继续；顶部“停止全部”随时取消。速度在启动服务时生效。",
                  bg=theme.PANEL, fg=theme.TEXT_DIM, anchor="w", justify="left", wraplength=1100, font=theme.FONT_SMALL)
         self.hint.pack(fill="x")
         self.status = tk.Label(panel, text=self._status_text, anchor="w", justify="left",
                                bg=theme.PANEL, fg=theme.ACCENT, font=theme.FONT_SMALL)
         self.status.pack(fill="x", pady=(3, 0))
+        self.ready_label = tk.Label(panel, text="", anchor="w", justify="left",
+                                    bg=theme.PANEL, fg=theme.WARN, font=theme.FONT_SMALL)
+        self.ready_label.pack(fill="x")
+        self.edit_bar = tk.Frame(panel, bg=theme.PANEL)
+        self.edit_label = tk.Label(self.edit_bar, text="", bg=theme.PANEL, fg=theme.TEXT_DIM,
+                                   anchor="w", font=theme.FONT_SMALL)
+        self.edit_label.pack(side="left", padx=4)
+        self._edit_button(self.edit_bar, "保存路网", self.save_edit_network, theme.OK)
+        self._edit_button(self.edit_bar, "删除选中节点", self.delete_edit_node)
+        self._edit_button(self.edit_bar, "撤销上一条边", self.undo_edit_edge)
+        self._edit_button(self.edit_bar, "取消选中", self.clear_edit_selection)
         split = ttk.Panedwindow(parent, orient="horizontal")
         split.pack(fill="both", expand=True, padx=6, pady=(0, 4))
         self.map_panel = NavigationMapPanel(split, self.model, on_pose=self.select_pose)
@@ -142,6 +165,150 @@ class NavigationFeature(Feature):
                            font=theme.FONT_SMALL, padx=7, pady=4)
         button.pack(side="left", padx=3, pady=2)
         return button
+
+    @staticmethod
+    def _edit_button(parent, text, command, color=None):
+        button = tk.Button(parent, text=text, command=command, bg=theme.PANEL_2,
+                           fg=color or theme.TEXT, relief="flat", activebackground=theme.BORDER,
+                           font=theme.FONT_SMALL, padx=6, pady=3)
+        button.pack(side="left", padx=2, pady=2)
+        return button
+
+    # -- hand-built road graph ---------------------------------------------------
+    def _mode_changed(self):
+        self.map_panel.set_mode(self.mode.get())
+        if self.mode.get() != "network" and self.editor is not None:
+            # Unsaved hand edits are dropped; the saved project stays authoritative.
+            self.editor = None
+            self._edit_selected = None
+            self.map_panel.set_network(self.network)
+            self.map_panel.set_selection(None)
+            self.map_panel.set_route(())
+        self._update_edit_bar()
+
+    def _ensure_editor(self):
+        project = self.sandbox.project if self.sandbox else None
+        if project is None:
+            return None
+        if self.editor is None or self.editor.project.path != project.path:
+            self.editor = NetworkEditor(project)
+            self._edit_selected = None
+        return self.editor
+
+    def _update_edit_bar(self):
+        if not hasattr(self, "edit_bar"):
+            return
+        if self.mode.get() == "network" and self.sandbox and self.sandbox.project:
+            self.edit_bar.pack(fill="x")
+            if self.editor is None:
+                self.edit_label.config(
+                    text="人工路网：点地图放第一个节点（首次会读取道路范围，稍等约 1 s）；"
+                         "再点另一个节点连线，点自己取消选中。")
+            else:
+                self.edit_label.config(text="人工路网：%d 节点 / %d 边%s" % (
+                    len(self.editor.nodes), len(self.editor.edges),
+                    "" if self._edit_selected is None else "，选中 %d" % self._edit_selected))
+        else:
+            self.edit_bar.pack_forget()
+            self._edit_selected = None
+
+    def _refresh_edit_overlay(self):
+        self.map_panel.set_network(self.editor.network())
+        self.map_panel.set_selection(self._edit_selected)
+        self.map_panel.set_route(())
+        self.map_panel.set_plan([])
+        self._update_edit_bar()
+
+    def _network_click(self, x, y):
+        editor = self._ensure_editor()
+        if editor is None:
+            return self._notice("请先导入沙盘工程，再人工编辑路网。", True)
+        node_id = editor.node_near(x, y)
+        if node_id is None:
+            node_id, error = editor.add_node(x, y)
+            if error:
+                return self._notice("新增节点失败：" + error, True)
+            self._edit_selected = node_id
+            self._refresh_edit_overlay()
+            return self._notice("新增节点 %d；再点另一个节点就连成一段。" % node_id)
+        if self._edit_selected is None:
+            self._edit_selected = node_id
+            self._refresh_edit_overlay()
+            return self._notice("选中节点 %d；再点另一个节点连线，点自己取消。" % node_id)
+        if self._edit_selected == node_id:
+            self._edit_selected = None
+            self._refresh_edit_overlay()
+            return self._notice("已取消选中。")
+        ok, message = editor.connect(self._edit_selected, node_id)
+        if not ok:
+            self._refresh_edit_overlay()
+            return self._notice("连线失败：" + message, True)
+        self._edit_selected = node_id
+        self._refresh_edit_overlay()
+        return self._notice(message)
+
+    def open_road_editor(self):
+        """Open the standalone annotation window on the imported sandbox project."""
+        project = self.sandbox.project if self.sandbox else None
+        if project is None:
+            return self._notice("先导入沙盘工程，再打开路网标注器。", True)
+        app_dir = Path(__file__).resolve().parents[2]
+        try:
+            subprocess.Popen([sys.executable, "-m", "carapp.road_editor", str(project.path)],
+                             cwd=str(app_dir))
+        except OSError as exc:
+            return self._notice("打开路网标注器失败：" + str(exc), True)
+        return self._notice("已打开独立的「沙盘路网标注」窗口；保存后回到本页点「导入沙盘工程」"
+                            "重新载入，就能用新路网规划。")
+
+    def save_edit_network(self):
+        if self.motion_active:
+            return self._notice("请先停止导航，再保存路网。", True)
+        editor = self.editor
+        if editor is None:
+            return self._notice("还没有手工改动；先点几个节点再连线。", True)
+        try:
+            project = editor.save()
+        except (OSError, ValueError) as exc:
+            return self._notice("保存失败：" + str(exc), True)
+        self.sandbox.project = project
+        self.network = project.network
+        self.network_path = project.path
+        self.route = ()
+        self.goal = self.goal_node = None
+        self.map_panel.set_network(self.network)
+        self.map_panel.set_route(())
+        self.map_panel.set_plan([])
+        self.map_panel.set_selection(None)
+        self.editor = None
+        self._edit_selected = None
+        self._update_edit_bar()
+        return self._notice("路网已保存到工程：%d 节点 / %d 条边（含反向），可直接规划。" % (
+            len(self.network), len(project.metadata.get("edge_widths") or {})))
+
+    def delete_edit_node(self):
+        if self.editor is None or self._edit_selected is None:
+            return self._notice("先点一个节点把它选中，再删除。", True)
+        node_id = self._edit_selected
+        error = self.editor.remove_node(node_id)
+        if error:
+            return self._notice(error, True)
+        self._edit_selected = None
+        self._refresh_edit_overlay()
+        return self._notice("已删除节点 %d 和它相连的边；改动还没保存。" % node_id)
+
+    def undo_edit_edge(self):
+        if self.editor is None or not self.editor.edges:
+            return self._notice("还没有连线可撤销。", True)
+        edge = sorted(self.editor.edges)[-1]
+        self.editor.remove_edge(*edge)
+        self._refresh_edit_overlay()
+        return self._notice("已撤销连线 %d–%d；改动还没保存。" % edge)
+
+    def clear_edit_selection(self):
+        self._edit_selected = None
+        self._refresh_edit_overlay()
+        return self._notice("已取消选中。")
 
     def _notice(self, text, error=False):
         self._status_text, self._status_error = str(text), bool(error)
@@ -384,6 +551,8 @@ class NavigationFeature(Feature):
     def select_pose(self, mode, x, y, yaw):
         if self.motion_active:
             return self._notice("请先停止当前导航，再修改目标或定位。", True)
+        if mode == "network":
+            return self._network_click(float(x), float(y))
         if not self.bundle or not valid_target(self.bundle, x, y) or not math.isfinite(yaw):
             return self._notice("请选择地图内的空闲区域；障碍物和未知区域不能作为位置。", True)
         pose = float(x), float(y), float(yaw)
@@ -433,15 +602,37 @@ class NavigationFeature(Feature):
             if self._ready():
                 self.plan()
 
-    def _ready(self):
+    def ready_blockers(self):
+        """Return the human-readable reasons the start button cannot run yet."""
+        reasons = []
         remote = self.session.snapshot() if self.session else {}
         scan, now = self.monitor.snapshot(), time.monotonic()
-        return bool(self.engaged and remote.get("connected") and remote.get("running")
-            and remote.get("ready") and self.ctx.state.get("ws_connected")
-            and self.ctx.state.get("cam_connected") and self._record
-            and self._record.camera is self.ctx.app.camera and self._record.camera.recording
-            and not scan.get("error") and now - scan.get("received_at", 0) < .8
-            and not self.ctx.motion_in_use(exclude=self))
+        state = self.ctx.state.snapshot()
+        if not self.session:
+            reasons.append("尚未连接导航服务（点“连接 / 检查”）")
+        elif not remote.get("connected"):
+            reasons.append("SSH 已断开，请重新连接")
+        if not remote.get("running"):
+            reasons.append("导航定位未启动（点“启动导航定位”）")
+        elif not remote.get("ready"):
+            reasons.append("车端定位未就绪（等待雷达定位确认，或先标定当前位置）")
+        if not state.get("ws_connected"):
+            reasons.append("ROS 未连接")
+        if not state.get("cam_connected"):
+            reasons.append("实时画面未连接")
+        record = self._record
+        if record is None:
+            reasons.append("导航录像未开始（启动导航定位后自动开始）")
+        elif record.camera is not self.ctx.app.camera or not record.camera.recording:
+            reasons.append("实时画面未在录制")
+        if scan.get("error") or now - scan.get("received_at", 0) >= .8:
+            reasons.append("雷达数据未就绪")
+        if self.ctx.motion_in_use(exclude=self):
+            reasons.append("其他功能正在占用底盘")
+        return reasons
+
+    def _ready(self):
+        return not self.ready_blockers()
 
     def plan(self):
         if self.sandbox.project is not None:
@@ -554,11 +745,31 @@ class NavigationFeature(Feature):
         if self._record and (not self.engaged and not remote.get("busy") and not remote.get("running")):
             self._finish_record()
 
+    def _show_ready_hint(self):
+        """Explain why the start button is grey, so the page never fails silently."""
+        label = getattr(self, "ready_label", None)
+        if label is None:
+            return
+        if self.motion_active:
+            text = ""
+        elif self.goal is None:
+            text = "开始导航不可用：先在路网上标记一个目标。"
+        else:
+            reasons = self.ready_blockers()
+            text = ("开始导航暂不可用：" + "；".join(reasons) + "。") if reasons else ""
+        if label.cget("text") != text:
+            label.config(text=text)
+
     def _handle_event(self, event):
         if event.get("stale") or event.get("canceled"):
             return
         op, result, error = event["operation"], event.get("result") or {}, event.get("error")
         if error:
+            if op == "initial_pose":
+                # A rejected initial pose never justifies cancelling a healthy
+                # session: the user only needs to click again once AMCL is up.
+                self._notice("标定位置未提交：%s；请稍候再点一次“标定当前位置 / 朝向”。" % error, True)
+                return
             self.stop_all()
             self._notice("%s 失败：%s" % (op, error), True)
             if op in ("start", "connect", "status"):
@@ -596,7 +807,10 @@ class NavigationFeature(Feature):
                 if not self.session.submit("navigate", *pending):
                     self._notice("导航请求未提交，服务正在处理操作；请再次点击开始导航。", True)
         elif op == "initial_pose":
-            self._notice("当前位置已提交；等待定位就绪后，标记目标。")
+            if result.get("queued"):
+                self._notice("定位服务还在激活；初始位置已排队，激活后会自动提交，请稍等。")
+            else:
+                self._notice("当前位置已提交；等待定位就绪后，标记目标。")
         elif op == "stop":
             self.engaged = False
             self._notice("导航服务已结束。")
@@ -620,7 +834,11 @@ class NavigationFeature(Feature):
             labels = {"navigating": "正在前往目标", "succeeded": "已到达目标", "canceled": "导航已取消",
                       "aborted": "导航失败，车辆已停", "error": "导航异常，车辆已停"}
             if phase in labels:
-                self._notice(labels[phase], phase in ("aborted", "error"))
+                detail = str(result.get("detail") or "").strip()
+                text = labels[phase]
+                if phase in ("canceled", "aborted", "error") and detail and detail != text:
+                    text = "%s：%s" % (text, detail)
+                self._notice(text, phase in ("aborted", "error"))
                 self._keyframe(phase)
 
     def _accept_navigation_pose(self, event):
@@ -656,6 +874,7 @@ class NavigationFeature(Feature):
         self.sandbox.on_tick()
         self.btn_import.config(state="disabled" if self._loading or self.engaged or self.motion_active else "normal")
         self.btn_navigate.config(state="normal" if self.goal and self._ready() and not self.motion_active else "disabled")
+        self._show_ready_hint()
         self.map_panel.on_tick(st)
         self.cam.on_tick(st)
 

@@ -8,7 +8,8 @@ import unittest
 from PIL import Image, ImageDraw
 from carapp.config import DEFAULTS
 from carapp.core.color_tracker import ColorTracker, detect_color
-from carapp.core.visual_pick import VisualPickRunner, VisualServoPolicy, validate_calibration
+from carapp.core.visual_pick import (VisualPickRunner, VisualServoPolicy, calibration_problem,
+                                     validate_calibration)
 from carapp.core.pick_approach import approach_config, ApproachProgress
 
 
@@ -37,6 +38,11 @@ class TrackingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_calibration(self.cal,'car','red',{'pitch':1500})
 
+    def test_calibration_problem_reports_why_the_page_cannot_start(self):
+        self.assertEqual(calibration_problem(self.cal,'car','red',self.cal['pose']),'')
+        self.assertIn('还没有夹取位置标定',calibration_problem(None,'car','red',self.cal['pose']))
+        self.assertIn('姿态已变化',calibration_problem(self.cal,'car','red',{'pitch':1,'yaw':2,'arm':3}))
+
     def test_far_target_generates_forward_motion_not_close(self):
         phase,vx,wz = self.policy.decide(observation(y=.29),time.monotonic())
         self.assertEqual(phase,'接近目标')
@@ -56,7 +62,7 @@ class TrackingTests(unittest.TestCase):
             self.assertEqual((vx,wz),(0,0))
 
     def test_ready_requires_distinct_frames_and_correct_size(self):
-        obs=observation(y=.75,width=.25)
+        obs=observation(y=.76,width=.25)
         for _ in range(5):
             self.assertNotEqual(self.policy.decide(obs,time.monotonic())[0],'到达夹取位置')
         obs['frame_id']=2
@@ -64,7 +70,54 @@ class TrackingTests(unittest.TestCase):
         obs['frame_id']=3
         self.assertEqual(self.policy.decide(obs,time.monotonic())[0],'到达夹取位置')
         with self.assertRaises(RuntimeError):
-            self.policy.decide(observation(y=.75,width=.10),time.monotonic())
+            self.policy.decide(observation(y=.76,width=.10),time.monotonic())
+
+    def test_close_to_the_line_keeps_creeping_instead_of_closing_on_air(self):
+        # Regression: stopping `y_tolerance` before the calibrated line left the
+        # fingers in front of the block, so the gripper closed on air.
+        for y in (.735,.75,.759):
+            obs=observation(y=y,width=.25)
+            phase,vx,wz=self.policy.decide(obs,time.monotonic())
+            self.assertEqual(phase,'接近目标')
+            self.assertGreater(vx,0)
+            self.assertEqual(wz,0)
+
+    def test_off_centre_block_is_recentred_before_the_fingers_close(self):
+        # Regression: the last-centimetres straight run used to tolerate a
+        # lateral error up to `near_x_tolerance`, so the fingers closed beside
+        # the block (2026-10-31 runs arrived with |dx| .068 and .032 and missed).
+        phase,vx,wz=self.policy.decide(observation(x=.52,y=.70,width=.25),time.monotonic())
+        self.assertEqual(phase,'左右对准')
+        self.assertEqual(vx,0)
+        self.assertLess(wz,0)
+
+    def test_centred_block_creeps_straight_to_the_line(self):
+        phase,vx,wz=self.policy.decide(observation(x=.45,y=.70,width=.25),time.monotonic())
+        self.assertEqual(phase,'接近目标')
+        self.assertGreater(vx,0)
+        self.assertEqual(wz,0)
+
+    def test_at_the_line_a_residual_offset_recentres_instead_of_closing(self):
+        phase,vx,wz=self.policy.decide(observation(x=.49,y=.76,width=.25),time.monotonic())
+        self.assertEqual(phase,'左右对准')
+        self.assertEqual(vx,0)
+        self.assertLess(wz,0)
+
+    def test_near_alignment_hysteresis_stops_the_phase_chatter(self):
+        # Start turning once clearly off-centre ...
+        self.assertEqual(self.policy.decide(observation(x=.50,y=.70,width=.25),time.monotonic())[0],'左右对准')
+        # ... keep turning while still outside the tighter exit band ...
+        self.assertEqual(self.policy.decide(observation(x=.47,y=.70,width=.25),time.monotonic())[0],'左右对准')
+        # ... and only then creep straight again.
+        phase,vx,wz=self.policy.decide(observation(x=.45,y=.70,width=.25),time.monotonic())
+        self.assertEqual(phase,'接近目标')
+        self.assertGreater(vx,0)
+        self.assertEqual(wz,0)
+
+    def test_far_target_still_aligns_as_before(self):
+        for _ in range(5):
+            far_phase,_,_=self.policy.decide(observation(x=.52,y=.30,width=.10),time.monotonic())
+            self.assertEqual(far_phase,'左右对准')
 
     def test_cancel_stops_without_later_gripper_commands(self):
         commands,servos=[],[]
@@ -162,6 +215,70 @@ class TrackingTests(unittest.TestCase):
         self.assertLess(sim['x'],1.1)
         self.assertEqual([list(p)[0] for _,p in servos],['gripper','arm'])
         self.assertTrue(all(v==0 for v,p in servos))
+
+    def test_start_dependencies_are_imported(self):
+        # start() 依赖这些名字；漏导入时界面回调只会 NameError，看起来就是“点了没反应”。
+        from carapp.features import tracking_pick
+        for name in ("validate_calibration", "calibration_problem", "validate_pick_reference"):
+            self.assertTrue(callable(getattr(tracking_pick, name, None)), name)
+
+    def _controls(self, cfg):
+        import types
+        from carapp.features.tracking_pick import TrackingPickControls
+        controls = TrackingPickControls.__new__(TrackingPickControls)
+        controls.ctx = types.SimpleNamespace(cfg=cfg)
+        controls.cfg = cfg["tracking_pick"]
+        return controls
+
+    def test_calibration_follows_the_car_not_its_address(self):
+        # 同一台车换接入方式（网线 ↔ STA）后仍用同一份夹取标定。
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["tracking_pick"]["calibrations"] = {"HW-A0857935:red": {"x": .45, "host": "HW-A0857935"}}
+        cfg["car"].update(profile_id="HW-A0857935", host="192.168.150.2", transport="wired")
+        controls = self._controls(cfg)
+        self.assertEqual(controls.calibration(), cfg["tracking_pick"]["calibrations"]["HW-A0857935:red"])
+        cfg["car"].update(host="192.168.167.118", transport="sta")
+        self.assertIsNotNone(controls.calibration())
+
+    def test_legacy_address_calibration_is_still_read(self):
+        # 旧版本按地址存标定；读出来时迁移成车辆身份，避免校验报“还没有标定”。
+        cfg = copy.deepcopy(DEFAULTS)
+        old = {"x": .45, "host": "192.168.150.2", "color": "red"}
+        cfg["tracking_pick"]["calibrations"] = {"HW-A0857935:192.168.150.2:red": old}
+        cfg["car"].update(profile_id="HW-A0857935", host="192.168.150.2", transport="wired")
+        cal = self._controls(cfg).calibration()
+        self.assertEqual(cal["host"], "HW-A0857935")
+        self.assertEqual(cal["x"], .45)
+
+    def test_calibration_saved_on_another_endpoint_of_the_same_car_is_found(self):
+        # 昨天在 STA 地址下标的定，今天换网线接同一台车也要直接可用。
+        cfg = copy.deepcopy(DEFAULTS)
+        old = {"x": .4654, "y": .8355, "width": .2891, "color": "red",
+               "host": "192.168.167.136", "pose": {"pitch": 1300, "yaw": 1500, "arm": 1796}}
+        cfg["tracking_pick"]["calibrations"] = {"HW-10CCA58E:192.168.167.136:red": old}
+        cfg["car"].update(profile_id="HW-10CCA58E", host="192.168.150.2", transport="wired")
+        cfg["cars"][0]["sta_host"] = "192.168.167.136"
+        cal = self._controls(cfg).calibration()
+        self.assertEqual(cal["y"], .8355)
+        self.assertEqual(cal["host"], "HW-10CCA58E")
+
+    def test_calibration_of_the_other_car_is_not_picked_up(self):
+        # 另一台车存在它自己地址下的标定，不能因为找不到而拿来用。
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["tracking_pick"]["calibrations"] = {
+            "HW-A0857935:192.168.150.2:red": {"x": .4, "host": "192.168.150.2"}}
+        cfg["car"].update(profile_id="HW-10CCA58E", host="192.168.150.3", transport="wired")
+        self.assertIsNone(self._controls(cfg).calibration())
+
+    def test_two_cars_still_keep_separate_calibrations(self):
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg["tracking_pick"]["calibrations"] = {"HW-10CCA58E:red": {"x": .4},
+                                                "HW-A0857935:red": {"x": .6}}
+        controls = self._controls(cfg)
+        cfg["car"].update(profile_id="HW-10CCA58E")
+        self.assertEqual(controls.calibration()["x"], .4)
+        cfg["car"].update(profile_id="HW-A0857935")
+        self.assertEqual(controls.calibration()["x"], .6)
 
 
 if __name__=='__main__':

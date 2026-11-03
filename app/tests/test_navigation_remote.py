@@ -84,6 +84,14 @@ class NavigationValidationTests(unittest.TestCase):
                 remote.start(MAP,speed=speed)
         self.assertFalse(remote.operations)
 
+    def test_parked_at_an_angle_can_still_start_navigation(self):
+        """Nav2 turns to the path heading itself; only a backwards start is refused."""
+        from carapp.core.sandbox_runtime import START_HEADING_TOLERANCE
+
+        self.assertGreaterEqual(START_HEADING_TOLERANCE, 1.2)
+        source = (Path(__file__).parents[1] / 'carapp/core/sandbox_runtime.py').read_text(encoding='utf-8')
+        self.assertIn('请把车头转向路线方向', source)
+
     def test_all_remote_payloads_compile_and_no_full_hardware_launch(self):
         compile(REMOTE_SCRIPT,'navigation RPC','exec')
         compile(LAUNCH_SOURCE,'navigation launch','exec')
@@ -172,6 +180,32 @@ class NavigationRemoteTests(unittest.TestCase):
             remote.navigate(1,2,0,intent_epoch=remote.capture_intent())
         self.assertFalse(remote._motion_allowed)
 
+    def test_transient_heartbeat_failures_do_not_cancel_a_running_goal(self):
+        remote = FakeRemote()
+        remote._lease_exists = True
+        original = remote._remote
+        state = dict(failures=0)
+
+        def flaky(operation, **values):
+            if operation == 'heartbeat' and state['failures']:
+                state['failures'] -= 1
+                raise OSError('wi-fi hiccup')
+            return original(operation, **values)
+
+        remote._remote = flaky
+        remote._disallow = Mock(wraps=remote._disallow)
+        state['failures'] = 2
+        self.assertFalse(remote._heartbeat_round())
+        self.assertFalse(remote._heartbeat_round())
+        remote._disallow.assert_not_called()
+        self.assertTrue(remote._heartbeat_round())
+        self.assertEqual(remote._heartbeat_misses, 0)
+        remote._disallow.assert_not_called()
+        state['failures'] = 3
+        for _ in range(3):
+            self.assertFalse(remote._heartbeat_round())
+        remote._disallow.assert_called_once()
+
     def test_out_of_band_cancel_bypasses_foreground_lock(self):
         remote = FakeRemote()
         remote._lease_exists = True
@@ -232,6 +266,21 @@ class RuntimeBoundaryTests(unittest.TestCase):
         runtime.amcl_at = 99.
         self.assertFalse(runtime._localized())
 
+    def test_cancel_keeps_the_real_cause_instead_of_a_generic_label(self):
+        runtime = self.runtime()
+        runtime.goal_state = 'navigating'
+        runtime.goal_epoch = 3
+        runtime.revoked_epoch = 0
+        runtime.goal_handle = None
+        runtime.cancel_future = None
+        runtime.last_sent = False
+        runtime.revoke_reason = ''
+        runtime._zero = lambda: None
+        runtime._revoke('控制心跳中断约 2.4 秒')
+        self.assertEqual(runtime.goal_state, 'canceled')
+        self.assertEqual(runtime.detail, '控制心跳中断约 2.4 秒')
+        self.assertEqual(runtime.revoke_reason, '控制心跳中断约 2.4 秒')
+
     def test_velocity_relay_clamps_speed_and_never_reverses(self):
         runtime = self.runtime()
         runtime.speed = .06
@@ -251,6 +300,60 @@ class RuntimeBoundaryTests(unittest.TestCase):
                                         angular=types.SimpleNamespace(z=0.))
         runtime._velocity(message)
         runtime._revoke.assert_called_once()
+
+    def test_startup_cleans_stale_sessions_before_refusing_to_start(self):
+        self.assertIn('def cleanup_stale()', REMOTE_SCRIPT)
+        startup = REMOTE_SCRIPT.split('def startup():', 1)[1]
+        self.assertLess(startup.index('cleanup_stale()'), startup.index('请先结束正在运行'))
+
+    def test_stale_navigation_stack_from_an_earlier_session_is_cleaned_up(self):
+        functions = [item for item in ast.parse(REMOTE_SCRIPT).body if isinstance(item, ast.FunctionDef)]
+        wanted = [item for item in functions if item.name in ('_cmdline', 'cleanup_stale')]
+        namespace = dict(json=json, signal=__import__('signal'), pathlib=__import__('pathlib'),
+                         root=Path('/tmp/carapp_nav_mine'),
+                         os=types.SimpleNamespace(getpid=lambda: 100, listdir=lambda path: [],
+                                                  kill=Mock(), killpg=Mock(), getpgid=lambda pid: pid),
+                         time=types.SimpleNamespace(sleep=Mock()))
+        exec(compile(ast.Module(body=wanted, type_ignores=[]), 'stale cleanup', 'exec'), namespace)
+        with patch.object(Path, 'glob', return_value=[Path('/tmp/carapp_nav_old')]), \
+                patch.object(Path, 'read_text', return_value=json.dumps(dict(root='/tmp/carapp_nav_mine_old', pid=4242))), \
+                patch.object(Path, 'read_bytes', return_value=b'python3\x00runtime.py'), \
+                patch.object(Path, 'is_dir', return_value=False):
+            namespace['cleanup_stale']()
+        namespace['os'].kill.assert_called_once_with(4242, __import__('signal').SIGINT)
+        namespace['os'].killpg.assert_not_called()
+        namespace['time'].sleep.assert_called_once()
+
+    def test_initial_pose_is_queued_until_amcl_activates(self):
+        runtime = self.runtime()
+        runtime.goal_handle = None
+        runtime.lifecycle_state = {}
+        runtime.detail = ''
+        runtime._reply = Mock()
+        runtime._publish_initial = Mock()
+        request = dict(op='initial_pose', request_id='r1', epoch=1,
+                       values=dict(x=1., y=2., yaw=.5))
+        runtime._request(request)
+        runtime._publish_initial.assert_not_called()
+        self.assertEqual(runtime._pending_initial[0], (1., 2., .5))
+        self.assertIn('排队', runtime.detail)
+        self.assertTrue(runtime._reply.call_args.args[1]['queued'])
+
+        runtime.lifecycle_state = dict(amcl=(3, 0.), map_server=(3, 0.))
+        runtime._flush_pending_initial(runtime._pending_initial[1] + .1)
+        runtime._publish_initial.assert_called_once_with((1., 2., .5))
+        self.assertIsNone(runtime._pending_initial)
+
+    def test_queued_initial_pose_expires_instead_of_firing_late(self):
+        runtime = self.runtime()
+        runtime._pending_initial = ((1., 2., 0.), 100.)
+        runtime.detail = ''
+        runtime._publish_initial = Mock()
+        runtime.lifecycle_state = {}
+        runtime._flush_pending_initial(131.)
+        runtime._publish_initial.assert_not_called()
+        self.assertIsNone(runtime._pending_initial)
+        self.assertIn('仍未激活', runtime.detail)
 
     def test_delayed_heartbeat_cannot_extend_expired_motion_lease(self):
         runtime = self.runtime()
@@ -273,6 +376,59 @@ class RuntimeBoundaryTests(unittest.TestCase):
             runtime._drive()
         runtime._revoke.assert_called_once()
         runtime.base.publish.assert_not_called()
+
+    def test_hung_lifecycle_call_is_retried_so_readiness_recovers(self):
+        runtime = self.runtime()
+        requests = []
+        answered = []
+
+        def call_async(request):
+            requests.append(request)
+            return types.SimpleNamespace(done=lambda: False,
+                                         add_done_callback=answered.append)
+
+        client = types.SimpleNamespace(service_is_ready=lambda: True, call_async=call_async)
+        runtime.lifecycle = dict(map_server=client)
+        runtime.lifecycle_state = {}
+        runtime.lifecycle_futures = dict(map_server=(types.SimpleNamespace(done=lambda: False), 100.))
+        services = types.ModuleType('lifecycle_msgs.srv')
+        services.GetState = types.SimpleNamespace(Request=lambda: object())
+        with patch.dict('sys.modules', {'lifecycle_msgs': types.ModuleType('lifecycle_msgs'),
+                                       'lifecycle_msgs.srv': services}), \
+                patch('carapp.core.navigation_runtime.time.monotonic', return_value=103.):
+            runtime._lifecycle_check()
+        self.assertEqual(len(requests), 1, 'a lost GetState call must be retried after its deadline')
+        self.assertEqual(len(answered), 1)
+        fresh = runtime.lifecycle_futures['map_server']
+        runtime.lifecycle_futures['map_server'] = (fresh[0], 102.5)
+        with patch.dict('sys.modules', {'lifecycle_msgs': types.ModuleType('lifecycle_msgs'),
+                                       'lifecycle_msgs.srv': services}), \
+                patch('carapp.core.navigation_runtime.time.monotonic', return_value=103.):
+            runtime._lifecycle_check()
+        self.assertEqual(len(requests), 1, 'a call still within its deadline must not be duplicated')
+
+        runtime.lifecycle = dict(map_server=types.SimpleNamespace(service_is_ready=lambda: False))
+        with patch.dict('sys.modules', {'lifecycle_msgs': types.ModuleType('lifecycle_msgs'),
+                                       'lifecycle_msgs.srv': services}), \
+                patch('carapp.core.navigation_runtime.time.monotonic', return_value=200.):
+            runtime._lifecycle_check()
+        self.assertEqual(runtime.lifecycle_state['map_server'], (0, 200.))
+
+    def test_ready_reasons_names_the_term_that_is_not_ready(self):
+        runtime = self.runtime()
+        runtime.launch = types.SimpleNamespace(poll=lambda: None)
+        runtime.lifecycle_names = ('amcl',)
+        runtime.lifecycle_state = dict(amcl=(3, 999.))
+        runtime.scan_at = runtime.odom_at = 1000.
+        runtime.planner = types.SimpleNamespace(server_is_ready=lambda: True)
+        runtime.navigator = types.SimpleNamespace(server_is_ready=lambda: True)
+        with patch('carapp.core.navigation_runtime.time.monotonic', return_value=1000.):
+            self.assertEqual(runtime._ready_reasons(), [])
+            runtime.lifecycle_state = dict(amcl=(1, 999.))
+            self.assertEqual(runtime._ready_reasons(), ['lifecycle:amcl'])
+            runtime.lifecycle_state = dict(amcl=(3, 999.))
+            runtime.planner = types.SimpleNamespace(server_is_ready=lambda: False)
+            self.assertEqual(runtime._ready_reasons(), ['planner'])
 
 
 if __name__ == '__main__':

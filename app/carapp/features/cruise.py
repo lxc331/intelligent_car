@@ -15,6 +15,7 @@ from carapp.core.vendor_lidar import split_scan
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.camerapanel import CameraPanel
+from carapp.ui.speedpicker import SpeedPicker
 
 
 class CruiseFeature(Feature):
@@ -71,17 +72,18 @@ class CruiseFeature(Feature):
         row = tk.Frame(panel, bg=theme.PANEL)
         row.pack(fill="x")
         self.detection_distance = tk.StringVar(value=str(cfg.get("detection_distance", .60)))
-        self.speed = tk.StringVar(value=str(cfg.get("speed", .06)))
-        for column, label, variable, lower, upper, step in (
-            (0, "检测距离（米）", self.detection_distance, .30, 1.50, .05),
-            (2, "移动速度（米/秒）", self.speed, .02, .15, .01),
-        ):
-            tk.Label(row, text=label, bg=theme.PANEL, fg=theme.TEXT,
-                     font=theme.FONT).grid(row=0, column=column, sticky="w")
-            tk.Spinbox(row, from_=lower, to=upper, increment=step, textvariable=variable,
-                       width=7, format="%.2f", bg=theme.PANEL_2, fg=theme.ACCENT,
-                       insertbackground=theme.TEXT, buttonbackground=theme.PANEL_2,
-                       font=theme.FONT_MONO, relief="flat").grid(row=0, column=column+1, padx=(6, 16))
+        tk.Label(row, text="检测距离（米）", bg=theme.PANEL, fg=theme.TEXT,
+                 font=theme.FONT).grid(row=0, column=0, sticky="w")
+        tk.Spinbox(row, from_=.30, to=1.50, increment=.05,
+                   textvariable=self.detection_distance, width=7, format="%.2f",
+                   bg=theme.PANEL_2, fg=theme.ACCENT, insertbackground=theme.TEXT,
+                   buttonbackground=theme.PANEL_2, font=theme.FONT_MONO,
+                   relief="flat").grid(row=0, column=1, padx=(6, 16))
+        self.speed_picker = SpeedPicker(row, label="移动速度（米/秒）", low=.02, high=.15,
+                                        value=float(cfg.get("speed", .06)),
+                                        presets=(.03, .06, .10, .15))
+        self.speed_picker.grid(row=0, column=2, sticky="w", padx=(0, 10))
+        self.speed = self.speed_picker.var
         actions = tk.Frame(panel, bg=theme.PANEL)
         actions.pack(fill="x", pady=(6, 0))
         for text, command, color in (

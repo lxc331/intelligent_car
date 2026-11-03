@@ -62,3 +62,46 @@ def interpolate(vertices,step=.025):
         count=max(1,math.ceil(distance/step))
         result.extend((a[0]+(b[0]-a[0])*i/count,a[1]+(b[1]-a[1])*i/count,yaw) for i in range(1,count+1))
     return tuple(result)
+
+
+def rounded_path(vertices,radius=.10,step=.025):
+    """Interpolate a waypoint polyline with quadratic arcs at the corners.
+
+    Following a raw polyline makes the controller stop at every node: the path
+    heading changes abruptly, so the curvature seen by the pure-pursuit lookahead
+    blows up and the car crawls or oscillates. Cutting each corner with a small
+    arc keeps the path inside the same corridor (the callers still validate the
+    result with ``swept_clear``) while giving the controller a continuous heading.
+    """
+    points=[(float(a[0]),float(a[1])) for a in vertices]
+    if len(points)<2:raise ValueError('路径至少需要两个点')
+    if len(points)==2:
+        return interpolate([(points[0][0],points[0][1],0.),(points[1][0],points[1][1],.0)],step)
+
+    def line(a,b):
+        length=math.dist(a,b)
+        if length<1e-9:return []
+        count=max(1,math.ceil(length/step))
+        return [(a[0]+(b[0]-a[0])*i/count,a[1]+(b[1]-a[1])*i/count) for i in range(1,count+1)]
+
+    sampled=[points[0]];cursor=points[0]
+    for index in range(1,len(points)-1):
+        previous=points[index-1];corner=points[index];following=points[index+1]
+        before=math.dist(previous,corner);after=math.dist(corner,following)
+        if before<1e-6 or after<1e-6:continue
+        cut=min(radius,.45*before,.45*after)
+        start=(corner[0]+(previous[0]-corner[0])/before*cut,corner[1]+(previous[1]-corner[1])/before*cut)
+        end=(corner[0]+(following[0]-corner[0])/after*cut,corner[1]+(following[1]-corner[1])/after*cut)
+        if math.dist(cursor,start)>1e-6:sampled.extend(line(cursor,start));cursor=start
+        arc=max(1,math.ceil((math.dist(start,corner)+math.dist(corner,end))/step))
+        for sample in range(1,arc+1):
+            t=sample/arc;u=1-t
+            point=(u*u*start[0]+2*u*t*corner[0]+t*t*end[0],u*u*start[1]+2*u*t*corner[1]+t*t*end[1])
+            if math.dist(cursor,point)>1e-6:sampled.append(point);cursor=point
+    if math.dist(cursor,points[-1])>1e-6:sampled.extend(line(cursor,points[-1]))
+    output=[]
+    for index,point in enumerate(sampled):
+        following=sampled[index+1] if index+1<len(sampled) else None
+        yaw=math.atan2(following[1]-point[1],following[0]-point[0]) if following else output[-1][2]
+        output.append((point[0],point[1],yaw))
+    return tuple(output)

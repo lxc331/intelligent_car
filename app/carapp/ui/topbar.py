@@ -182,7 +182,8 @@ class TopBar(tk.Frame):
             return
         profile = next((c for c in self.cars if self._car_label(c) == self.var_car.get()), {})
         transport = self._selected_transport()
-        profile_id = profile.get("id") if transport in ("wifi", "sta") else None
+        # 所选车辆就是这台车的身份；有线也照样带档案，不再按地址悄悄改判。
+        profile_id = profile.get("id") if profile else None
         if not self.app.change_host(host, profile_id, transport,
                                     sta_ssid=self.var_sta_ssid.get().strip() if transport == "sta" else None):
             self.sync_selection()
@@ -203,7 +204,7 @@ class TopBar(tk.Frame):
     def _use(self, host):
         profile = next((c for c in self.cars if self._car_label(c) == self.var_car.get()), {})
         transport = self._selected_transport()
-        profile_id = profile.get("id") if transport in ("wifi", "sta") else None
+        profile_id = profile.get("id") if profile else None
         if self.app.change_host(host, profile_id, transport,
                                 sta_ssid=self.var_sta_ssid.get().strip() if transport == "sta" else None):
             self.app.log("使用所选服务地址：%s" % host)

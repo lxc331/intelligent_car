@@ -1,5 +1,6 @@
 """Mapping controls: continuous holds, focus ownership and connection loss."""
 import copy
+import os
 import threading
 import tkinter as tk
 import types
@@ -9,7 +10,7 @@ from unittest.mock import patch
 from carapp.config import DEFAULTS
 from carapp.core.key_state import key_is_down
 from carapp.core.teleop import TeleopController
-from carapp.ui.teleoppanel import TeleopPanel, _MotionGate
+from carapp.ui.teleoppanel import TeleopPanel, _MotionGate, map_speed
 
 
 class Context:
@@ -96,6 +97,64 @@ class MappingGateTests(unittest.TestCase):
         self.assertEqual(ctx.sent[-1], (0., 0., 0.))
         self.assertFalse(controller.pressed)
         controller.close()
+
+
+class MapSpeedSettingTests(unittest.TestCase):
+    """run.bat sets CARAPP_MAP_SPEED; the panel must start at that speed."""
+
+    def test_env_value_is_used_and_bad_values_are_clamped(self):
+        with patch.dict(os.environ, {"CARAPP_MAP_SPEED": "0.08"}):
+            self.assertEqual(map_speed(), .08)
+            self.assertEqual(map_speed("0.03"), .03)
+        with patch.dict(os.environ, {"CARAPP_MAP_SPEED": "0.50"}):
+            self.assertEqual(map_speed(), .10)
+        with patch.dict(os.environ, {"CARAPP_MAP_SPEED": "0.001"}):
+            self.assertEqual(map_speed(), .02)
+        with patch.dict(os.environ, {"CARAPP_MAP_SPEED": "abc"}):
+            self.assertEqual(map_speed(), .04)
+        with patch.dict(os.environ, {"CARAPP_MAP_SPEED": ""}):
+            self.assertEqual(map_speed(), .04)
+
+    def test_panel_starts_at_the_configured_speed(self):
+        root = tk.Tk()
+        root.withdraw()
+        ctx = Context(root)
+        try:
+            with patch.dict(os.environ, {"CARAPP_MAP_SPEED": "0.07"}):
+                with patch("carapp.ui.teleoppanel.TeleopController",
+                           side_effect=lambda gate: TeleopController(gate, autostart=False)):
+                    panel = TeleopPanel(root, ctx, ready=lambda: True)
+            try:
+                self.assertEqual(panel.speed.get(), "0.07")
+                self.assertEqual(panel.controller.speed, .07)
+            finally:
+                panel.close()
+        finally:
+            root.destroy()
+
+    def test_preset_speed_applies_and_is_reported_for_saving(self):
+        root = tk.Tk()
+        root.withdraw()
+        ctx = Context(root)
+        reported = []
+        try:
+            with patch.dict(os.environ, {"CARAPP_MAP_SPEED": "0.04"}):
+                with patch("carapp.ui.teleoppanel.TeleopController",
+                           side_effect=lambda gate: TeleopController(gate, autostart=False)):
+                    panel = TeleopPanel(root, ctx, ready=lambda: True,
+                                        on_speed=reported.append)
+            try:
+                self.assertTrue(panel.set_speed_value(.06))
+                self.assertEqual(panel.speed.get(), "0.06")
+                self.assertEqual(panel.controller.speed, .06)
+                self.assertEqual(reported, [.06])
+                panel.speed.set("0.50")
+                self.assertFalse(panel.apply_speed())
+                self.assertEqual(reported, [.06])
+            finally:
+                panel.close()
+        finally:
+            root.destroy()
 
 
 class MappingTeleopUITests(unittest.TestCase):

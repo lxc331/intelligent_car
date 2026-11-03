@@ -2,10 +2,12 @@
 import tkinter as tk
 
 from carapp.core.teleop import CONTROL_KEYS, TeleopController
+from carapp.config import save_config
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.camerapanel import CameraPanel
 from carapp.ui.focus import widget_has_focus
+from carapp.ui.speedpicker import SpeedPicker
 
 
 class RemoteFeature(Feature):
@@ -35,14 +37,17 @@ class RemoteFeature(Feature):
         tk.Label(mode, text="速度", bg=theme.PANEL, fg=theme.TEXT_DIM,
                  font=theme.FONT_SMALL).pack(side="left", padx=(18, 4))
         base = self.ctx.cfg.get("base", {})
-        levels = list(base.get("speed_levels", {"慢": .06, "中": .1, "快": .15}))
+        level_values = base.get("speed_levels", {"慢": .06, "中": .1, "快": .15})
+        levels = list(level_values)
         default = base.get("default_level", "慢")
         self.var_level = tk.StringVar(value=default if default in levels else levels[0])
-        option = tk.OptionMenu(mode, self.var_level, *levels, command=self.speed_changed)
-        option.config(bg=theme.PANEL_2, fg=theme.TEXT, highlightthickness=0,
-                      activebackground=theme.BORDER, relief="flat", font=theme.FONT_SMALL, width=4)
-        option["menu"].config(bg=theme.PANEL_2, fg=theme.TEXT, font=theme.FONT_SMALL)
-        option.pack(side="left")
+        self.custom_speed = None
+        initial = base.get("speed", level_values.get(self.var_level.get(), .06))
+        self.speed_picker = SpeedPicker(mode, label="速度（m/s）", low=.02, high=.15,
+                                        value=float(initial),
+                                        presets=tuple(float(v) for v in level_values.values()),
+                                        on_apply=self.speed_changed)
+        self.speed_picker.pack(side="left", padx=(4, 0))
         self._button(mode, "■ 停止 / 退出键盘", self.stop_all, theme.ERR).pack(side="right", padx=8)
 
         self.mouse_panel = tk.Frame(parent, bg=theme.BG)
@@ -59,7 +64,7 @@ class RemoteFeature(Feature):
         self.targets.pack(fill="x", padx=12, pady=(2, 0))
         self.cam = CameraPanel(parent, self.ctx)
         self.cam.pack(fill="both", expand=True, pady=(6, 6))
-        self.speed_changed()
+        self.speed_changed(persist=False)
 
     def _button(self, parent, label, command=None, color=None):
         return tk.Button(parent, text=label, command=command, bg=theme.PANEL_2,
@@ -150,10 +155,21 @@ class RemoteFeature(Feature):
             return False
         return True
 
-    def speed_changed(self, _value=None):
+    def speed_changed(self, value=None, persist=True):
         cfg = self.ctx.cfg.get("base", {})
-        self.controller.set_speed(cfg.get("speed_levels", {}).get(self.var_level.get(), .06),
-                                  cfg.get("turn_speed", .4))
+        if value is None:
+            value = self.speed_picker.value()
+        value = float(value)
+        self.custom_speed = value
+        self.controller.set_speed(value, cfg.get("turn_speed", .4))
+        if not persist or cfg.get("speed") == value:
+            return
+        cfg["speed"] = value
+        try:
+            save_config(self.ctx.cfg)
+            self.ctx.log("遥控速度已保存：%.2f m/s" % value)
+        except Exception:  # persistence must never break driving
+            self.ctx.log("遥控速度已生效，但保存到配置失败")
 
     def change_mode(self):
         self.stop_all()

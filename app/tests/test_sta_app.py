@@ -90,6 +90,31 @@ class STAAppTests(unittest.TestCase):
         TopBar._use(bar, '192.168.137.194')
         self.app.change_host.assert_called_with('192.168.137.194','HW-A0857935','sta',sta_ssid='new_wifi')
 
+    def test_wired_keeps_the_selected_car_instead_of_guessing_from_address(self):
+        # 有线以前按地址猜车辆；同一根网线换车时就会悄悄换档案、换标定。
+        self.app.change_host = Mock(return_value=True)
+        bar = self.bar(transport='wired')
+        bar.var_host = Variable('192.168.150.7')
+        TopBar._apply(bar)
+        self.app.change_host.assert_called_with('192.168.150.7', 'HW-A0857935', 'wired', sta_ssid=None)
+        TopBar._use(bar, '192.168.150.8')
+        self.app.change_host.assert_called_with('192.168.150.8', 'HW-A0857935', 'wired', sta_ssid=None)
+
+    def test_manual_address_on_wired_keeps_no_profile(self):
+        self.app.change_host = Mock(return_value=True)
+        bar = self.bar(transport='wired')
+        bar.var_car = Variable('手动地址')
+        bar.var_host = Variable('192.168.150.2')
+        TopBar._apply(bar)
+        self.app.change_host.assert_called_with('192.168.150.2', None, 'wired', sta_ssid=None)
+
+    def test_switch_log_names_the_vehicle_profile(self):
+        with patch('carapp.main.save_config'):
+            self.assertTrue(self.app.change_host('192.168.150.2', 'HW-A0857935', 'wired'))
+        message = self.app.log.call_args.args[0]
+        self.assertIn('2 号车', message)
+        self.assertIn('HW-A0857935', message)
+
     def test_missing_sta_address_cancel_keeps_active_selection(self):
         bar = self.bar()
         bar.winfo_toplevel = lambda: None

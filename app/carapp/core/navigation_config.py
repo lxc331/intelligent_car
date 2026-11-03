@@ -44,9 +44,9 @@ def navigation_parameters(vendor, controller, map_path, speed):
         critics.append('ObstacleFootprint')
     follow['critics'] = critics
     follow['ObstacleFootprint.scale'] = 1.
-    # A conservative rectangle measured relative to the laser. It includes the
-    # claw and wheels; small padding also covers base/laser mounting offsets.
-    footprint = '[[0.24,0.105],[0.24,-0.105],[-0.11,-0.105],[-0.11,0.105]]'
+    # 车身实测约 0.30 × 0.18 m（含夹爪），加 1 cm padding 后为 0.20 前 /
+    # 0.10 后 / ±0.09 半宽；与 navigation.sandbox_footprint 保持一致。
+    footprint = '[[0.19,0.08],[0.19,-0.08],[-0.09,-0.08],[-0.09,0.08]]'
     for name in ('global_costmap', 'local_costmap'):
         cost = params.setdefault(name, {}).setdefault(name, {}).setdefault('ros__parameters', {})
         cost.update(robot_base_frame='base_footprint', footprint=footprint,

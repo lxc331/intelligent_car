@@ -73,6 +73,7 @@ class NavigationRuntime(RoadRuntime):
         self.laser_frame = ''
         self.pose_requested_at = 0.
         self.pose_covariance_ok = False
+        self._pending_initial = None
         self.goal_state = 'idle'
         self.goal_handle = None
         self.cancel_future = None
@@ -82,6 +83,7 @@ class NavigationRuntime(RoadRuntime):
         self.lease = dict(at=0., expires=0., allow=False, epoch=0)
         self.path = []
         self.distance_remaining = None
+        self.revoke_reason = ''
         self.command = None
         self.command_at = 0.
         self.last_sent = False
@@ -197,22 +199,53 @@ class NavigationRuntime(RoadRuntime):
                     self.planner.server_is_ready() and self.navigator.server_is_ready())
 
     def _lifecycle_check(self):
+        """Poll node lifecycle states, retrying calls that never answer.
+
+        A GetState request sent while a node is still starting can be lost, and
+        a lost request never completes.  Without a deadline that single hung
+        call would leave the old (stale) state in place forever and the owner
+        would report ready=False for the rest of the session.
+        """
         from lifecycle_msgs.srv import GetState
+        now = time.monotonic()
         for name, client in self.lifecycle.items():
-            old = self.lifecycle_futures.get(name)
-            if old and not old.done():
+            entry = self.lifecycle_futures.get(name)
+            if entry and not entry[0].done() and now - entry[1] < 2.0:
                 continue
             if not client.service_is_ready():
-                self.lifecycle_state[name] = (0, time.monotonic())
+                self.lifecycle_state[name] = (0, now)
                 continue
             future = client.call_async(GetState.Request())
-            self.lifecycle_futures[name] = future
+            self.lifecycle_futures[name] = (future, now)
+
             def receive(done, name=name):
                 try:
                     self.lifecycle_state[name] = (done.result().current_state.id, time.monotonic())
                 except Exception:
                     self.lifecycle_state[name] = (0, time.monotonic())
+
             future.add_done_callback(receive)
+
+    def _ready_reasons(self):
+        now = time.monotonic()
+        reasons = []
+        if not (self.launch and self.launch.poll() is None):
+            reasons.append('launch')
+        if not self._localized():
+            reasons.append('localized')
+        if now - self.scan_at >= .7:
+            reasons.append('scan')
+        if now - self.odom_at >= 1.:
+            reasons.append('odom')
+        for name in self.lifecycle_names:
+            state, seen_at = self.lifecycle_state.get(name, (0, 0))
+            if state != 3 or now - seen_at >= 3.:
+                reasons.append('lifecycle:' + name)
+        if not self.planner.server_is_ready():
+            reasons.append('planner')
+        if not self.navigator.server_is_ready():
+            reasons.append('navigator')
+        return reasons
 
     def _write_state(self):
         pose = self._pose()
@@ -220,6 +253,7 @@ class NavigationRuntime(RoadRuntime):
         running = bool(self.launch and self.launch.poll() is None and not self.quitting)
         atomic(self.root / 'state.json', dict(connected=True, running=running, owned=running,
                ready=ready, localized=self._localized(), pose=pose, goal_state=self.goal_state,
+               ready_reasons=self._ready_reasons(),
                motion_stopped=not (self.goal_handle or self.last_sent or
                                    self.goal_state in ('accepted','navigating','canceling','paused')),
                motion_active=self.goal_state in ('accepted','navigating','canceling','paused'),
@@ -236,6 +270,11 @@ class NavigationRuntime(RoadRuntime):
         self.last_sent = False
 
     def _revoke(self, reason='导航已取消'):
+        active = self.goal_state in ('accepted','navigating','planning','paused','checking_blockage','canceling')
+        if active and reason:
+            # Keep the real cause: Nav2 reports the cancel itself as a plain
+            # cancelled goal, which would otherwise hide a lease/health failure.
+            self.revoke_reason = reason
         self._resume_path = None
         self._resume_target = None
         self._traffic_paused = False
@@ -351,13 +390,22 @@ class NavigationRuntime(RoadRuntime):
         if self.goal_state in ('accepted','navigating','paused') and (
                 int(self.lease.get('epoch',-1)) > self.goal_epoch or
                 not self.lease.get('allow') or now > self.lease.get('expires',0.)):
-            self._revoke()
+            if int(self.lease.get('epoch',-1)) > self.goal_epoch:
+                reason='控制租约已被新的操作取代，导航已停止；请重新点击开始导航'
+            elif not self.lease.get('allow'):
+                reason='控制许可已撤销（如点了停止或切换到别的功能），导航已停止'
+            else:
+                gap=now-self.lease.get('at',now)
+                reason=('控制心跳中断约 %.1f 秒，车端按安全策略停车并作废本次导航；请重新点击开始导航'
+                        % max(0.,gap))
+            self._revoke(reason)
         if now - self.lease.get('at',0.) > 90.:
             self.quitting = True
         if self.launch and self.launch.poll() is not None:
             self._revoke('Nav2 进程已退出')
             self.quitting = True
         self._resume_after_traffic(now)
+        self._flush_pending_initial(now)
         for path in sorted(self.root.glob('*.request.json'))[:8]:
             try:
                 request = json.loads(path.read_text())
@@ -392,6 +440,35 @@ class NavigationRuntime(RoadRuntime):
         message.pose.position.x, message.pose.position.y = x, y
         message.pose.orientation.z, message.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         return message
+
+    def _initial_active(self):
+        return all(self.lifecycle_state.get(name, (0, 0))[0] == 3 for name in ('amcl', 'map_server'))
+
+    def _publish_initial(self, target):
+        from geometry_msgs.msg import PoseWithCovarianceStamped
+        message = PoseWithCovarianceStamped()
+        stamped = self._stamped(*target)
+        message.header = stamped.header
+        message.pose.pose = stamped.pose
+        message.pose.covariance[0] = message.pose.covariance[7] = .04
+        message.pose.covariance[35] = .07
+        self.pose_requested_at = time.monotonic()
+        self.pose_covariance_ok = False
+        self.pose_publisher.publish(message)
+        self.path = []
+        self.detail = '初始位置已提交，等待 AMCL 确认；可低速遥控辅助定位'
+
+    def _flush_pending_initial(self, now):
+        pending = getattr(self, '_pending_initial', None)
+        if not pending:
+            return
+        target, queued_at = pending
+        if self._initial_active():
+            self._pending_initial = None
+            self._publish_initial(target)
+        elif now - queued_at > 30.:
+            self._pending_initial = None
+            self.detail = '地图与定位服务仍未激活；请稍后重新标定当前位置'
 
     def _request(self, request):
         operation = request['op']
@@ -431,7 +508,7 @@ class NavigationRuntime(RoadRuntime):
             if hashlib.sha256(raw).hexdigest()!=values['sha256']:raise ValueError('路径校验失败')
             payload=json.loads(raw)
             if payload['project_id']!=json.loads((self.root/'project.json').read_text())['id']:raise ValueError('路径与工程不匹配')
-            self._check_road(request,payload['points']);return
+            self._check_road(dict(request,pass_cost=payload.get('pass_cost',253)),payload['points']);return
         target = tuple(float(values[name]) for name in ('x','y','yaw'))
         if not all(math.isfinite(value) for value in target):
             raise ValueError('目标坐标必须是有限数值')
@@ -443,23 +520,17 @@ class NavigationRuntime(RoadRuntime):
             if not all(math.isfinite(value) for value in start):
                 raise ValueError('起点坐标必须是有限数值')
         if operation == 'initial_pose':
-            from geometry_msgs.msg import PoseWithCovarianceStamped
             if self.goal_handle:
                 raise RuntimeError('导航期间不能重设定位')
-            if any(self.lifecycle_state.get(name,(0,0))[0] != 3 for name in ('amcl','map_server')):
-                raise RuntimeError('地图与定位服务尚未激活，请稍候再标记初始位置')
-            message = PoseWithCovarianceStamped()
-            stamped = self._stamped(*target)
-            message.header = stamped.header
-            message.pose.pose = stamped.pose
-            message.pose.covariance[0] = message.pose.covariance[7] = .04
-            message.pose.covariance[35] = .07
-            self.pose_requested_at = time.monotonic()
-            self.pose_covariance_ok = False
-            self.pose_publisher.publish(message)
-            self.path = []
-            self.detail = '初始位置已提交，等待 AMCL 确认；可低速遥控辅助定位'
-            self._reply(request, dict(running=True, localized=False, ready=False))
+            if self._initial_active():
+                self._publish_initial(target)
+                self._reply(request, dict(running=True, localized=False, ready=False))
+            else:
+                # AMCL and the map server activate a few seconds after the launch
+                # starts; queue the seed instead of failing the whole session.
+                self._pending_initial = (target, time.monotonic())
+                self.detail = '地图与定位服务正在激活；初始位置已排队，激活后自动提交'
+                self._reply(request, dict(running=True, localized=False, ready=False, queued=True))
             return
         if not self._ready():
             raise RuntimeError('导航尚未就绪：请确认初始位置、定位、雷达与 Nav2 生命周期')
@@ -547,6 +618,7 @@ class NavigationRuntime(RoadRuntime):
                     self._revoke()
                     self._reply(request, error='导航已取消，未开始行驶')
                 else:
+                    self.revoke_reason = ''
                     self.goal_state = 'navigating'
                     self.detail = '正在沿已验证道路路径行驶；遇阻停车' if path else '正在导航；动态障碍出现时 Nav2 将重新规划'
                     if self._traffic_holds() or self._traffic_paused:
@@ -573,7 +645,8 @@ class NavigationRuntime(RoadRuntime):
                         if code is None:
                             raise RuntimeError('导航结果读取失败')
                         self.goal_state = {4:'succeeded',5:'canceled',6:'aborted'}.get(code,'error')
-                        self.detail = {'succeeded':'已到达目标点','canceled':'导航已取消',
+                        self.detail = {'succeeded':'已到达目标点',
+                                       'canceled':self.revoke_reason or '导航已取消',
                                        'aborted':'导航失败，请检查通路或定位'}.get(self.goal_state,'导航异常结束')
                     except Exception:
                         self.goal_state, self.detail = 'error', '导航结果读取失败'

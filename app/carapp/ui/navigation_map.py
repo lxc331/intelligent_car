@@ -22,6 +22,7 @@ class NavigationMapPanel(MapPanel):
         self.plan = ()
         self.network = None
         self.route = ()
+        self.selection = None
         self._start_id = None
         self._selection = None
         self._selection_error = ""
@@ -48,12 +49,16 @@ class NavigationMapPanel(MapPanel):
                 widget.configure(text="浅色：空闲　深色：占用　灰色：未知　左键选点/拖出朝向　右键平移　滚轮缩放")
 
     def set_mode(self, mode):
-        if mode not in ("goal", "start", "initial", "pan"):
+        if mode not in ("goal", "start", "initial", "pan", "network"):
             raise ValueError("地图操作模式无效")
         self.mode = mode
         self._selection = None
         self._selection_error = ""
         self.canvas.configure(cursor="fleur" if mode == "pan" else "crosshair")
+
+    def set_selection(self, node_id=None):
+        """Highlight the road node the editor is currently holding."""
+        self.selection = None if node_id is None else int(node_id)
 
     def set_model(self, model):
         """Switch a worker-prepared map even when its revision matches the old one."""
@@ -162,11 +167,16 @@ class NavigationMapPanel(MapPanel):
         point = self.canvas_to_world(selection[1], selection[2])
         if point is None:
             return "break"
+        finish = self.canvas_to_world(event.x, event.y)
+        moved = math.hypot(event.x - selection[1], event.y - selection[2]) >= 4
+        if self.mode == "network":
+            # The editor validates the point itself and explains what is wrong.
+            if self.on_pose:
+                self.on_pose("network", *point, 0.)
+            return "break"
         if not valid_target(self._grid, *point):
             self._selection_error = "请选择地图内的已知空闲区域；障碍物和未知区域不能作为目标或初始位置。"
             return "break"
-        finish = self.canvas_to_world(event.x, event.y)
-        moved = math.hypot(event.x - selection[1], event.y - selection[2]) >= 4
         yaw = math.atan2(finish[1] - point[1], finish[0] - point[0]) if moved else 0.
         if self.on_pose:
             self.on_pose(self.mode, *point, yaw)
@@ -205,6 +215,10 @@ class NavigationMapPanel(MapPanel):
                                     tags="nav_network")
             self.canvas.create_text(x + 5, y + 5, text=str(node.id), anchor="nw",
                                     fill="#a9c3c8", font=theme.FONT_SMALL, tags="nav_network")
+        if self.selection in points:
+            x, y = points[self.selection]
+            self.canvas.create_oval(x - 8, y - 8, x + 8, y + 8, outline="#ffd166", width=2,
+                                    tags="nav_network")
 
     def _draw(self, snapshot):
         visible = snapshot

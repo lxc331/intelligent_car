@@ -1,0 +1,35 @@
+{
+  "local_dir": "D:\\项目\\intelligent_car-main\\app\\savedMap\\sandbox_20261031_2025",
+  "remote_dir": "/tmp/slam_agent",
+  "files": [
+    {
+      "name": "map.yaml",
+      "size": 121,
+      "sha256": "f381b83bcae549f3415651f2c11233894397dcef4d58b3debf7653c62a7319e0"
+    },
+    {
+      "name": "map.pgm",
+      "size": 71835,
+      "sha256": "c953891b31ff7d23898bc5986bf8b294119ee8fca2e732915fba08d22316f3ef"
+    },
+    {
+      "name": "map.posegraph",
+      "size": 11130091,
+      "sha256": "f2f34a5d1ae775db97a56b329153cd5147587f780080a5ed37ec4379312f90ea"
+    },
+    {
+      "name": "map.data",
+      "size": 1656786,
+      "sha256": "abe2076a89a803640327a5f7db00ea3c7700de71df751bde75d93a57e70619be"
+    }
+  ],
+  "serialized": true,
+  "warnings": [],
+  "scope": "container",
+  "profile_id": "HW-A0857935",
+  "host": "192.168.167.136",
+  "recovered_from_existing_save": false,
+  "recovered_at": "2026-10-31T20:26:00",
+  "vehicle_files_changed": [],
+  "note": "SLAM Toolbox mapping run 2026-10-31 evening, driven around the sandbox road loop"
+}

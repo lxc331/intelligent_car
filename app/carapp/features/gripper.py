@@ -17,9 +17,11 @@ import threading
 import time
 import tkinter as tk
 
+from carapp.config import save_config
 from carapp.features.base import Feature
 from carapp.ui import theme
 from carapp.ui.camerapanel import CameraPanel
+from carapp.ui.speedpicker import SpeedPicker
 from carapp.features.tracking_pick import TrackingPickControls
 
 
@@ -39,6 +41,7 @@ class GripperFeature(Feature):
         self.tracking = None
         self._layout_timer = None
         self._layout_closed = False
+        self.custom_speed = None
 
     @property
     def motion_active(self):
@@ -148,20 +151,18 @@ class GripperFeature(Feature):
         extras = tk.Frame(box, bg=theme.PANEL)
         extras.pack(fill="x")
 
-        tk.Label(controls, text="速度", bg=theme.PANEL, fg=theme.TEXT_DIM,
-                 font=theme.FONT_SMALL).pack(side="left", padx=(0, 4))
-
-        levels = list(self.base_cfg.get("speed_levels", {"慢": 0.06, "中": 0.10, "快": 0.15}).keys())
+        levels = list(self.base_cfg.get("speed_levels", {"慢": 0.06, "中": 0.10, "快": 0.15}))
         default = self.base_cfg.get("default_level", "慢")
         self.var_level = tk.StringVar(value=default if default in levels else levels[0])
-        om = tk.OptionMenu(controls, self.var_level, *levels)
-        om.config(bg=theme.PANEL_2, fg=theme.TEXT, relief="flat", bd=0,
-                  highlightthickness=1, highlightbackground=theme.BORDER,
-                  font=theme.FONT_SMALL, width=4, anchor="center",
-                  activebackground=theme.BORDER, activeforeground=theme.TEXT)
-        om["menu"].config(bg=theme.PANEL_2, fg=theme.TEXT,
-                          activebackground=theme.BORDER, font=theme.FONT_SMALL)
-        om.pack(side="left", padx=(0, 10))
+        self.custom_speed = None
+        level_values = self.base_cfg.get("speed_levels", {"慢": 0.06, "中": 0.10, "快": 0.15})
+        initial = self.base_cfg.get("speed", level_values.get(self.var_level.get(), 0.06))
+        self.speed_picker = SpeedPicker(controls, label="速度（m/s）", low=.02, high=.15,
+                                        value=float(initial),
+                                        presets=tuple(float(v) for v in level_values.values()),
+                                        on_apply=self.speed_changed)
+        self.speed_picker.pack(side="left", padx=(0, 10))
+        self.custom_speed = float(initial) if "speed" in self.base_cfg else None
 
         self.hold_btns = []
         for text, vx, wz in (("↑ 前进", 1, 0), ("↓ 后退", -1, 0),
@@ -307,8 +308,26 @@ class GripperFeature(Feature):
 
     # ---------- 底盘 ----------
     def _speed(self):
+        if self.custom_speed is not None:
+            return float(self.custom_speed)
         levels = self.base_cfg.get("speed_levels", {"慢": 0.06, "中": 0.10, "快": 0.15})
         return float(levels.get(self.var_level.get(), 0.06))
+
+    def speed_changed(self, value=None):
+        """Pick the jog speed in the page; keep the choice across restarts."""
+        if value is None:
+            value = self.speed_picker.value()
+        value = float(value)
+        self.custom_speed = value
+        base = self.ctx.cfg.get("base", {})
+        if base.get("speed") == value:
+            return
+        base["speed"] = value
+        try:
+            save_config(self.ctx.cfg)
+            self.ctx.log("夹取页速度已保存：%.2f m/s" % value)
+        except Exception:  # persistence must never break driving
+            self.ctx.log("夹取页速度已生效，但保存到配置失败")
 
     def _turn(self):
         return float(self.base_cfg.get("turn_speed", 0.40))

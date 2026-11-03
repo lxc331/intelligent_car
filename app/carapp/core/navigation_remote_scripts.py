@@ -67,14 +67,45 @@ def sourced(operation):
  if len(result.stdout)>1048576: raise RuntimeError('Oversized navigation response')
  sys.stdout.buffer.write(result.stdout)
 
+def _cmdline(pid):
+ try: return pathlib.Path('/proc',str(pid),'cmdline').read_bytes().decode('utf8','replace')
+ except (OSError,UnicodeError): return ''
+
+def cleanup_stale():
+ """Stop navigation stacks left behind by earlier carapp sessions."""
+ me=os.getpid(); groups=set(); owners=[]
+ for entry in pathlib.Path('/tmp').glob('carapp_nav_*'):
+  try: owner=json.loads((entry/'owner.json').read_text())
+  except (OSError,ValueError): continue
+  if owner.get('root')==str(root): continue
+  pid=int(owner.get('pid',0) or 0)
+  if pid>1 and _cmdline(pid): owners.append(pid)
+ for name in os.listdir('/proc'):
+  if not name.isdigit() or int(name)==me: continue
+  text=_cmdline(int(name))
+  if '/tmp/carapp_nav_' in text and 'navigation.launch.py' in text:
+   try: groups.add(os.getpgid(int(name)))
+   except OSError: pass
+ stopped=False
+ for pid in owners:
+  try: os.kill(pid,signal.SIGINT); stopped=True
+  except OSError: pass
+ for group in groups:
+  if group==os.getpgid(me): continue
+  try: os.killpg(group,signal.SIGTERM); stopped=True
+  except OSError: pass
+ if stopped: time.sleep(3.)
+
 def probe():
  import rclpy
  from ament_index_python.packages import get_package_share_directory
  rclpy.init(args=['--ros-args','--disable-external-lib-logs'])
  node=rclpy.create_node('carapp_navigation_check_'+uuid.uuid4().hex[:8])
  try:
-  until=time.monotonic()+1.5
-  while time.monotonic()<until: rclpy.spin_once(node,timeout_sec=.1)
+  until=time.monotonic()+3.0
+  while time.monotonic()<until:
+   rclpy.spin_once(node,timeout_sec=.1)
+   if node.count_publishers('/scan_raw') and node.count_publishers('/odom'): break
   names=[ns.rstrip('/')+'/'+name for name,ns in node.get_node_names_and_namespaces()]
   required=['navigation','nav2_amcl','nav2_map_server','nav2_planner','nav2_navfn_planner',
             'nav2_controller','dwb_core','nav2_smoother','nav2_behaviors','nav2_bt_navigator',
@@ -99,10 +130,14 @@ def probe():
 def startup():
  with open('/tmp/carapp_navigation_start.lock','a') as lock:
   fcntl.flock(lock,fcntl.LOCK_EX)
+  cleanup_stale()
   info=probe()
   if info['missing'] or not info['config_exists']: raise RuntimeError(info['detail']+'; vendor config unavailable')
   if info['conflicts'] or info['publishers']['/map']:
-   raise RuntimeError('请先结束正在运行的建图或其他导航服务：'+', '.join(info['conflicts']))
+   cleanup_stale()
+   info=probe()
+  if info['conflicts'] or info['publishers']['/map']:
+   raise RuntimeError('请先结束正在运行的建图或其他导航服务：'+', '.join(info['conflicts'] or ['/map']))
   if not info['publishers']['/scan_raw'] or not info['publishers']['/odom']:
    raise RuntimeError('雷达或里程计尚未运行')
   if owned(): raise RuntimeError('This owner already has a navigation process')

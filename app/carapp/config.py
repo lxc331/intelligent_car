@@ -49,31 +49,28 @@ CALIBRATIONS = {
         # 2026-10-29 实测：指令 0.06 m/s 实际 0.112 m/s，比例 1.87（车头前路障 + 雷达当尺）
         "junction": {"speed_scale": 1.87},
     },
-    # 2 号车：2026-10-28 实车逐项重测（摄像头取证 + 用户现场确认）。
-    # 俯仰方向与 1 号车相反：1150 仰视…1800 俯视，物理上限只到 1800。
-    # 云台水平限位不变，但数值越大越左。
+    # 2 号车：2026-10-31 实车复核，装配方向与 1 号车一致——同一天用 1 号车
+    # 参数（1300 俯视 / 1700 降臂 / 俯仰 +1）在本车上完成视觉准备、两爪间标定
+    # 与夹取，故整套沿用 1 号车实机值。原 2026-10-28 记录（1600 / 1950 /
+    # 俯仰 -1、物理上限 1800）实测的是另一台样车，见
+    # docs/records/验证记录_20261028_逐车标定.md，保留备查。
     "HW-A0857935": {
         "servo": {
-            "limits": {"pitch": [1150, 1800], "yaw": [650, 2350],
-                       "arm": [1250, 2000], "gripper": [1500, 2000]},
+            "limits": {"pitch": [1150, 2250], "yaw": [650, 2350],
+                       "arm": [1200, 2000], "gripper": [1500, 2000]},
             "actions": {"open": 2000, "close": 1500, "half_open": 1750,
-                        "arm_up": 1300, "arm_down": 1950,
-                        "look_down": 1600, "look_forward": 1450},
+                        "arm_up": 1200, "arm_down": 1700,
+                        "look_down": 1300, "look_forward": 1500},
             "presets": {
-                "待机（张爪）": {"pitch": 1600, "yaw": 1500, "arm": 1900, "gripper": 2000},
-                "俯视观察": {"pitch": 1750, "yaw": 1500, "arm": 1900, "gripper": 2000},
-                "夹取准备": {"pitch": 1780, "yaw": 1500, "arm": 1950, "gripper": 2000},
-                "抬起持物": {"pitch": 1600, "yaw": 1500, "arm": 1300, "gripper": 1500},
+                "待机（张爪）": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 2000},
+                "俯视观察": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 2000},
+                "夹取准备": {"pitch": 1300, "yaw": 1500, "arm": 1700, "gripper": 2000},
+                "抬起持物": {"pitch": 1300, "yaw": 1500, "arm": 1200, "gripper": 1500},
             },
-            "signs": {"pitch": -1, "yaw": 1},
+            "signs": {"pitch": 1, "yaw": 1},
         },
-        # 实测：1450 平视（灯在画面上部）、1600 低头能看到停止线、
-        # 1380 抬头时红灯落在画面中部（检出 0.59）。
-        "traffic_light": {"dip_pitch": 1600, "confirm_pitch": 1380, "restore_pitch": 1450},
-        # 2026-10-29 实测：指令 0.06 m/s 实际约 0.076–0.079 m/s，比例 1.30；
-        # 行号-距离用俯视 1600 视角标定（该车相机比 1 号车低、倾角大）
-        "junction": {"speed_scale": 1.30, "row_slope": -0.001733, "row_intercept": 1.123,
-                     "row_trigger": 396., "finish_travel": .03, "track_pitch": 1450},
+        "traffic_light": {"dip_pitch": 1450, "confirm_pitch": 1720, "restore_pitch": 1500},
+        "junction": {"speed_scale": 1.87},
     },
 }
 
@@ -146,7 +143,9 @@ DEFAULTS = {
     "tracking_pick": {
         "color": "red", "max_speed": .06, "min_speed": .02,
         "max_turn": .30, "turn_gain": 1.2, "control_hz": 10,
-        "x_tolerance": .035, "y_tolerance": .025, "overshoot_margin": .08,
+        "x_tolerance": .035, "arrive_margin": .0, "overshoot_margin": .08,
+        "straight_margin": .12, "near_align_enter": .04, "near_align_exit": .015,
+        "close_x_tolerance": .02,
         "stable_frames": 3, "frame_timeout": .6, "lost_timeout": 2.,
         "odom_timeout": .8, "max_seconds": 45., "max_distance": .8,
         "calibrations": {},
@@ -156,7 +155,19 @@ DEFAULTS = {
     "terminal": {"port": 22, "username": "pi", "auto_connect": True},
     "mapping": {"remote_dir": "/home/ubuntu/ros2_ws/src/slam/maps",
                 "scope": "container", "serialize": True},
-    "navigation": {"speed": .06},
+    "navigation": {
+        "speed": .06,
+        # 沙盘路网在电脑端按 keepout 规划，车端再用这一档复核实时代价图：
+        # 253=整块机身（含夹爪）必须完全避开障碍；254=允许机身内切圈贴住障碍，
+        # 即擦碰余量为零，只在场地窄道确实过不去时用。
+        "sandbox_pass_cost": 254,
+        # 沙盘路网校验用的车体尺寸（米，车身坐标：front 朝前、rear 朝后、
+        # half 半宽）。只用于电脑端窄道判定与人工标注器的连线检查；车端
+        # Nav2 另有一套 footprint。实测后可在这里改，改完重新载入工程即可。
+        "sandbox_footprint": {"front": .19, "rear": .09, "half": .08},
+        # 车端是否在发车前用实时代价图复核整条路径；默认关闭，避免窄道被误判。
+        "sandbox_verify_path": False,
+    },
     "traffic_light": {
         # 全帧之外再对七块区域裁切放大后推理：640x480 里一盏灯只有十几到
         # 三十像素，整帧缩到 320 后模型看不到，而模型对取景非常敏感——同一
@@ -252,6 +263,26 @@ def _merge(base, override):
     return out
 
 
+def sandbox_footprint(cfg, padding=.01):
+    """电脑端窄道判定用的车体半尺寸 (front, rear, half)，含栅格/控制余量。
+
+    配置里的值是车身实测尺寸；这里加 padding（默认 1 cm）作为离散化与
+    跟踪误差余量。三项都是米。
+    """
+    size = ((cfg or {}).get("navigation") or {}).get("sandbox_footprint") or {}
+    def number(key, fallback):
+        try:
+            value = float(size.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if value > 0 else fallback
+    front = number("front", .19)
+    rear = number("rear", .09)
+    half = number("half", .08)
+    pad = max(0.0, float(padding))
+    return (front + pad, rear + pad, half + pad)
+
+
 def load_config(path=CONFIG_PATH):
     cfg = copy.deepcopy(DEFAULTS)
     if os.path.exists(path):
@@ -269,9 +300,9 @@ def load_config(path=CONFIG_PATH):
 def apply_calibration(cfg):
     """按当前车辆档案套用逐车标定（方向/限位/动作/预设/红绿灯视角）。
 
-    标定表是硬编码的实测结果：两台车的云台装配方向相反，用同一套数值会让
-    云台往反方向顶到机械限位，所以这里覆盖 settings.json 的同名项，而不是
-    只做默认值填充。未知车辆保持配置文件里的值。
+    标定表是实车实测结果：不同车的云台方向或限位可能不同，用错车的数值会把
+    云台顶到机械限位，所以这里覆盖 settings.json 的同名项，而不是只做默认值
+    填充。未知车辆保持配置文件里的值。
     """
     profile = (cfg.get("car") or {}).get("profile_id") or ""
     calibration = CALIBRATIONS.get(profile)

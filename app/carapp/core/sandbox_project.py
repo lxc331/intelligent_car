@@ -70,6 +70,28 @@ def load_project(path):
     return SandboxProject(path,local,roads,keepout,network,reg,meta)
 
 
+def save_network(project_path,network,widths,footprint=None):
+    """Rewrite only the road graph in an existing project and refresh its hash.
+
+    The previous graph and manifest are restored if the edited project cannot be
+    loaded again, so a rejected edit never leaves the folder unusable.
+    """
+    path=Path(project_path).resolve(strict=True);root=path.parent
+    graph=root/'road_network.yaml'
+    old_graph,old_meta=graph.read_bytes(),path.read_text(encoding='utf8')
+    meta=json.loads(old_meta)
+    network.save(graph)
+    meta['edge_widths']={str(key):float(value) for key,value in widths.items()}
+    if footprint:meta['footprint']=[round(float(value),4) for value in footprint]
+    meta['sha256']['road_network.yaml']=digest(graph)
+    try:
+        path.write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf8')
+        return load_project(path)
+    except Exception:
+        graph.write_bytes(old_graph);path.write_text(old_meta,encoding='utf8')
+        raise
+
+
 def build_project(localization_path,road_path,source,target,destination,*,max_rms=.075):
     localization=load_navigation_map(localization_path);localization.as_upload()
     roads=load_navigation_map(road_path)

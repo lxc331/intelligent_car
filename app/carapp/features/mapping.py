@@ -93,7 +93,8 @@ class MappingFeature(Feature):
         self.status = tk.Label(panel, text="未连接建图服务；二维雷达建图，摄像头用于辅助观察。",
                                bg=theme.PANEL, fg=theme.TEXT_DIM, anchor="w", font=theme.FONT_SMALL)
         self.status.pack(fill="x", pady=(3, 0))
-        self.teleop = TeleopPanel(parent, self.ctx, ready=self._ready)
+        self.teleop = TeleopPanel(parent, self.ctx, ready=self._ready,
+                                  speed=cfg.get("speed"), on_speed=self._speed_changed)
         self.teleop.pack(fill="x", padx=6, pady=(0, 4))
         self.split = ttk.Panedwindow(parent, orient="horizontal")
         self.split.pack(fill="both", expand=True, padx=6, pady=(0, 4))
@@ -121,6 +122,12 @@ class MappingFeature(Feature):
         car = self.ctx.cfg["car"]
         self._identity = (car.get("profile_id"), car.get("host"), car.get("transport"))
         self.peer.config(text="当前车：%s" % car.get("host", "--"))
+
+    def _speed_changed(self, value):
+        """Remember the mapping drive speed picked in the page's own controls."""
+        self.ctx.cfg.setdefault("mapping", {})["speed"] = value
+        save_config(self.ctx.cfg)
+        self.ctx.log("建图速度已保存：%.2f m/s" % value)
 
     def _notice(self, text, error=False):
         self.status.config(text=text, fg=theme.ERR if error else theme.ACCENT)

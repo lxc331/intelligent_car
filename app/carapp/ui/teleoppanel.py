@@ -4,6 +4,7 @@ The page calls on_background_tick every 100 ms to refresh motion permission;
 on_tick only updates the controls' text while that page is selected.
 """
 import math
+import os
 import threading
 import tkinter as tk
 
@@ -11,6 +12,33 @@ from carapp.core.teleop import BASE_KEYS, TeleopController
 from carapp.core.key_state import key_is_down
 from carapp.ui import theme
 from carapp.ui.focus import widget_has_focus
+from carapp.ui.speedpicker import SpeedPicker
+
+#: Environment variable set by app/run.bat so the mapping drive speed is chosen
+#: once at launch instead of being retyped in the spinbox every session.
+MAP_SPEED_ENV = "CARAPP_MAP_SPEED"
+MAP_SPEED_RANGE = (.02, .10)
+MAP_SPEED_DEFAULT = .04
+
+
+def map_speed(value=None):
+    """Resolve the mapping teleop speed: explicit value, CARAPP_MAP_SPEED, default.
+
+    Out-of-range or unparsable values clamp/fall back instead of failing, so a
+    typo in run.bat can never start the mapping page at a dangerous speed.
+    """
+    low, high = MAP_SPEED_RANGE
+    for candidate in (value, os.environ.get(MAP_SPEED_ENV)):
+        if candidate in (None, ""):
+            continue
+        try:
+            speed = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(speed):
+            continue
+        return min(high, max(low, speed))
+    return MAP_SPEED_DEFAULT
 
 
 class _MotionGate:
@@ -48,10 +76,11 @@ class TeleopPanel(tk.Frame):
     every 100 ms; ``on_tick`` only renders the currently selected page.
     No key bindings are installed on the root window or other input fields.
     """
-    def __init__(self, parent, ctx, ready=None):
+    def __init__(self, parent, ctx, ready=None, speed=None, on_speed=None):
         super().__init__(parent, bg=theme.PANEL)
         self.ctx = ctx
         self.ready = ready or (lambda: True)
+        self.on_speed = on_speed
         self._active = False
         self._armed = False
         self._closed = False
@@ -61,9 +90,10 @@ class TeleopPanel(tk.Frame):
         self._gate = _MotionGate(ctx)
         self.controller = TeleopController(self._gate)
         self.mode = tk.StringVar(value="mouse")
-        self.speed = tk.StringVar(value="0.04")
+        self.start_speed = map_speed(speed)
+        self.speed = tk.StringVar(value="%.2f" % self.start_speed)
         self._build()
-        self.controller.set_speed(.04, .25)
+        self.controller.set_speed(self.start_speed, .25)
 
     def _button(self, parent, label, command=None, color=None):
         return tk.Button(parent, text=label, command=command, bg=theme.PANEL_2,
@@ -81,16 +111,11 @@ class TeleopPanel(tk.Frame):
                            command=self.change_mode, bg=theme.PANEL, fg=theme.TEXT,
                            selectcolor=theme.BG, activebackground=theme.PANEL,
                            activeforeground=theme.ACCENT, font=theme.FONT_SMALL).pack(side="left")
-        tk.Label(bar, text="速度（m/s）", bg=theme.PANEL, fg=theme.TEXT_DIM,
-                 font=theme.FONT_SMALL).pack(side="left", padx=(12, 3))
-        speed = tk.Spinbox(bar, textvariable=self.speed, from_=.02, to=.10,
-                           increment=.01, format="%.2f", width=5,
-                           command=self.apply_speed, bg=theme.PANEL_2, fg=theme.TEXT,
-                           insertbackground=theme.TEXT, buttonbackground=theme.PANEL_2,
-                           relief="flat", font=theme.FONT_MONO)
-        speed.pack(side="left", padx=4)
-        speed.bind("<Return>", lambda _event: self.apply_speed())
-        speed.bind("<FocusOut>", lambda _event: self.apply_speed())
+        self.picker = SpeedPicker(bar, label="建图速度（m/s）", low=.02, high=.10,
+                                  value=self.start_speed, presets=(.03, .04, .05, .06, .08),
+                                  on_apply=self._speed_picked, label_bold=True)
+        self.picker.pack(side="left")
+        self.speed = self.picker.var
         self._button(bar, "■ 停止 / 退出键盘", self.stop, theme.ERR).pack(side="right")
 
         self.mouse_panel = tk.Frame(self, bg=theme.PANEL)
@@ -142,6 +167,15 @@ class TeleopPanel(tk.Frame):
             self._gate.allowed.clear()
         return permitted
 
+    def set_speed_value(self, value):
+        """Apply a preset speed from the quick buttons (0.02-0.10 m/s)."""
+        return self.picker.set_value(value)
+
+    def _speed_picked(self, value):
+        """Called by the shared picker after it normalised the input."""
+        self.speed.set("%.2f" % value)
+        return self.apply_speed()
+
     def apply_speed(self):
         self.stop()
         try:
@@ -152,6 +186,12 @@ class TeleopPanel(tk.Frame):
             self.ctx.log("建图遥控速度无效，请输入 0.02–0.10 m/s")
             return False
         self.controller.set_speed(value, .25)
+        self.speed.set("%.2f" % value)
+        if self.on_speed is not None:
+            try:
+                self.on_speed(value)
+            except Exception:  # persistence must never break driving
+                self.ctx.log("建图速度已生效，但保存到配置失败")
         return True
 
     def change_mode(self):
