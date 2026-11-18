@@ -264,6 +264,8 @@ DEFAULTS = {
         # 2026-10-29 用车前路障雷达实测：指令 0.06 m/s 实际约 0.112 m/s，比例 1.87。
         "speed_scale": 1.87,      # 真实速度 / 指令速度，用于把里程换算成真实米数
     },
+    # 路侧红绿灯广播（UDP + JSON）。页面只读展示，不参与停车判定。
+    "signal": {"port": 8765, "timeout": 3.0},
     "status": {"poll_interval": 1.0, "nodes_interval": 6.0, "log_lines": 300},
 }
 

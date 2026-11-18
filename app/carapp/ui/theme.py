@@ -31,7 +31,7 @@ def style_ttk(root):
     st.configure(".", background=BG, foreground=TEXT, fieldbackground=PANEL_2)
     st.configure("TNotebook", background=BG, borderwidth=0)
     st.configure("TNotebook.Tab", background=PANEL, foreground=TEXT_DIM,
-                 padding=(16, 7), borderwidth=0)
+                 padding=(13, 7), borderwidth=0)
     st.map("TNotebook.Tab",
            background=[("selected", PANEL_2)],
            foreground=[("selected", ACCENT)])

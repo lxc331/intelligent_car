@@ -15,6 +15,7 @@
 | 沙盘建模 + 实时展示 | 复用车端 SLAM Toolbox，鼠标/键盘遥控，地图与视频并排显示，地图双端保存 |
 | 沙盘导航 + 实时展示 | 导入已保存地图、标定当前位置和朝向、点选目标、预览路径、使用车端 Nav2 自动前往 |
 | 集成终端 | SSH 交互命令行、进入 ClawPi 容器、宿主机/容器目录浏览、文本文件只读预览 |
+| 广播灯态 | 只读显示路侧红绿灯 UDP 广播的横/纵灯色、序号、掩码、阶段与超时状态 |
 | 两车连接 | 车辆档案、有线/AP 热点/STA 局域网切换、服务搜索、连接诊断、ROS 与视频断线重连 |
 | 视频与记录 | 图像话题切换、识别框与标定线、抓帧、本机录像、视觉夹取运行记录 |
 | 红绿灯功能 | 顶部开关隔离；斑马线路口确认、场景减速、路口内红灯停车及恢复 |
@@ -97,6 +98,7 @@ python -m carapp.main --tab gripper
 python -m carapp.main --tab remote
 python -m carapp.main --tab cruise
 python -m carapp.main --tab terminal
+python -m carapp.main --tab signal
 ```
 
 `--host` 覆盖本次启动地址；在界面中应用地址或切换车辆会保存配置。使用热点时优先通过车辆和连接方式选择，不能仅凭共享 IP 区分车辆。
@@ -270,6 +272,15 @@ API Key 仅保留到本次 App 退出，不写入配置、历史文件或运行�
 
 **里程计是"指令积分"，不是轮速反馈（重要）**：车端 `/odom` 由厂家 `odom_publisher_node.py` 的 `cal_odom_fun()` 用 `cmd_vel` 的 `linear_x * dt`、`angular_z * dt` 累加得到，没有读轮子编码器，也**完全忽略 `linear_y`**（横移时 `/odom` 不动）。因此：① `/odom` 不能当真实位移，只能当"指令走了多少"；② 实测真实速度约是指令速度的 1.87 倍（指令 0.06 m/s → 实际 0.112 m/s，用车前路障 + 雷达量得），代码里用 `junction.speed_scale` 把指令里程换算成真实米数后再比较 `finish_travel`；③ 航向保持只能保持"指令航向"，真实跑偏要靠视觉/雷达，不能只看 `/odom` 的 yaw。
 
+## 路侧红绿灯广播（只读）
+
+“广播灯态”页接收路侧发送端按 JSON 数据报广播的红绿灯状态（UDP，默认端口 8765，报文 `type` 为 `traffic_signal`），显示横向/纵向灯色、序号 `seq`、掩码 `mask_hex`、阶段 `phase`、对端地址、累计包数与坏包数。首次进入页面时开始监听，可手动停止或重试；退出 App 时关闭套接字。
+
+- **只读展示**：本页不向 ROS、底盘或舵机下发任何指令，也不参与红绿灯互锁和停车判定；停车仍只由视觉红绿灯功能决定。
+- 超过 `signal.timeout`（默认 3 秒）没有新报文时，状态栏变黄并提示“广播已超时”，灯态保留最后一次收到的值并标注“（超时）”，避免把旧灯态当成实时状态。
+- 端口与超时在 `app/config/settings.json` 的 `signal` 段（`port` / `timeout`）；端口被占用时页面显示失败原因，可点“重试监听”。
+- 收包实现在 [`app/carapp/core/signal_receiver.py`](app/carapp/core/signal_receiver.py)，与 Tk 无关；页面只读消费它的 `snapshot()`，不注册任何回调。
+
 ## 集成终端与文件浏览
 
 终端连接当前顶部所选车辆，默认 SSH 用户为 `pi`、端口为 `22`，与 ROS、视频连接相互独立。
@@ -380,7 +391,7 @@ cd app
 python -m unittest discover -s tests -v
 ```
 
-现有 792 个用例，覆盖连接恢复、控制限位与中止、视觉追踪、逐车标定、导航规划/执行、路网编辑、统一速度控件与集成终端；测试通过不能替代两台实车的逐车校准与现场验证。交接说明与当前技术路线见 `docs/交接文档_20261103.md`。
+现有 869 个用例，覆盖连接恢复、控制限位与中止、视觉追踪、逐车标定、导航规划/执行、路网编辑、统一速度控件、路侧红绿灯广播接收与集成终端；测试通过不能替代两台实车的逐车校准与现场验证。交接说明与当前技术路线见 `docs/交接文档_20261103.md`。
 
 新增页面时继承 `app/carapp/features/base.py` 中的 `Feature`，实现 `build()`，按需实现 `on_tick()`、`on_background_tick()`、`on_activate()`、`on_deactivate()`、`on_close()`，然后在 `app/carapp/features/__init__.py` 的 `FEATURES` 列表注册。当前注册顺序是 `GripperFeature`、`RemoteFeature`、`AIAssistantFeature`、`CruiseFeature`、`MappingFeature`、`NavigationFeature`、`TerminalFeature`。
 
