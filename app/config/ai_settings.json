@@ -1,0 +1,8 @@
+{
+  "asr_model": "qwen3-asr-flash",
+  "asr_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "asr_mode": "dashscope",
+  "provider": "DeepSeek",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash"
+}

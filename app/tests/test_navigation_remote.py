@@ -110,13 +110,43 @@ class NavigationValidationTests(unittest.TestCase):
         operation, values = remote.operations[-1]
         self.assertEqual(operation, 'plan')
         self.assertEqual(values['values'], dict(x=.5, y=.5, yaw=0.,
-            start=dict(x=-.5, y=-.5, yaw=1.57)))
+            start=[-.5, -.5, 1.57]))
         self.assertFalse(any(name in values for name in ('allow', 'epochs', 'values_allowed')))
         remote.plan(.5, .5, 0.)
         self.assertNotIn('start', remote.operations[-1][1]['values'])
         for start in ((math.nan, 0., 0.), (-.5, -.5)):
             with self.assertRaises(ValueError):
                 remote.plan(.5, .5, 0., start=start)
+
+    def test_start_carries_validated_corridor_thresholds(self):
+        remote = FakeRemote()
+        remote.start(MAP, speed=.06, avoid=dict(stop_distance=.22, half_width=.05))
+        operation, values = next(item for item in remote.operations if item[0] == 'start')
+        self.assertEqual(operation, 'start')
+        self.assertAlmostEqual(values['avoid']['stop_distance'], .22)
+        self.assertAlmostEqual(values['avoid']['half_width'], .05)
+        self.assertAlmostEqual(values['avoid']['lookahead'], .55)   # filled from defaults
+        self.assertTrue(values['avoid']['enabled'])
+        for bad in (dict(stop_distance=.02), dict(slow_distance=.20), dict(half_width=1.),
+                    dict(stop_distance=math.inf), dict(lookahead=.1)):
+            with self.subTest(avoid=bad), self.assertRaises(ValueError):
+                FakeRemote().start(MAP, speed=.06, avoid=bad)
+
+    def test_car_runtime_reads_the_start_pose_the_desktop_sends(self):
+        """The wire format is a 3-element array; the car must never see an object."""
+        from carapp.core.navigation_runtime import start_pose
+        remote = FakeRemote()
+        remote.plan(.5, .5, 0., start=(-.5, -.5, 1.57))
+        values = json.loads(json.dumps(remote.operations[-1][1]['values']))
+        self.assertEqual(start_pose(values), (-.5, -.5, 1.57))
+        self.assertIsNone(start_pose(dict(x=.5, y=.5, yaw=0.)))
+        # A car runtime left over from an older desktop build still plans.
+        self.assertEqual(start_pose(dict(start=dict(x=-.5, y=-.5, yaw=1.57))),
+                         (-.5, -.5, 1.57))
+        for bad in (dict(start=[-.5, -.5]), dict(start=dict(x=-.5, y=-.5)),
+                    dict(start=[-.5, -.5, math.nan]), dict(start='-0.5,-0.5,0')):
+            with self.subTest(start=bad), self.assertRaises(ValueError):
+                start_pose(bad)
 
 
 class NavigationParameterTests(unittest.TestCase):
@@ -280,6 +310,139 @@ class RuntimeBoundaryTests(unittest.TestCase):
         self.assertEqual(runtime.goal_state, 'canceled')
         self.assertEqual(runtime.detail, '控制心跳中断约 2.4 秒')
         self.assertEqual(runtime.revoke_reason, '控制心跳中断约 2.4 秒')
+
+    def test_corridor_obstacle_pauses_the_goal_and_releases_when_clear(self):
+        from carapp.core.sandbox_runtime import ForwardGuard
+        runtime = self.runtime()
+        runtime._guard = ForwardGuard(stop_distance=.25, slow_distance=.45, clear_distance=.32,
+                                      hold=0., release=0.)
+        runtime.path = [(0., 0., 0.), (.2, 0., 0.), (.4, 0., 0.)]
+        runtime._pose = lambda: (0., 0., 0.)
+        runtime.laser_frame = 'lidar_frame'
+        runtime.scan_at = 1000.
+        runtime._scan_data = ([.10, 8., 8.], -0.5, 0.5, .03, 8.)
+        runtime.tf = types.SimpleNamespace(lookup_transform=lambda *args: types.SimpleNamespace(
+            transform=types.SimpleNamespace(
+                translation=types.SimpleNamespace(x=0., y=0.),
+                rotation=types.SimpleNamespace(x=0., y=0., z=0., w=1.))))
+        runtime.rclpy = types.SimpleNamespace(time=types.SimpleNamespace(Time=lambda: None))
+        runtime.goal_state = 'navigating'
+        runtime.goal_handle = Mock()
+        runtime.cancel_future = None
+        runtime._pause_source = ''
+        runtime._zero = lambda: None
+        runtime._avoid_view = dict(blocked=False, distance=None, since=0.)
+        runtime._drive_avoidance(1000.)
+        self.assertEqual(runtime.goal_state, 'paused')
+        self.assertEqual(runtime._pause_source, 'obstacle')
+        self.assertTrue(runtime._avoid_view['blocked'])
+        self.assertIn('障碍', runtime.detail)
+
+        runtime._resume_motion = Mock()
+        runtime._scan_data = ([8., 8., 8.], -0.5, 0.5, .03, 8.)
+        runtime.scan_at = 1001.
+        runtime._drive_avoidance(1001.)
+        runtime.scan_at = 1002.
+        runtime._drive_avoidance(1002.)
+        runtime._resume_motion.assert_called_once()
+
+    def test_unmeasurable_corridor_never_reports_clear(self):
+        from carapp.core.sandbox_runtime import ForwardGuard
+        runtime = self.runtime()
+        runtime._guard = ForwardGuard()
+        runtime.path = [(0., 0., 0.), (.4, 0., 0.)]
+        runtime._pose = lambda: (0., 0., 0.)
+        runtime.laser_frame = 'lidar_frame'
+        runtime.scan_at = 1000.
+        runtime._scan_data = ([.10], -0.5, 0.5, .03, 8.)
+        runtime.tf = types.SimpleNamespace(lookup_transform=Mock(side_effect=RuntimeError('no tf')))
+        runtime.rclpy = types.SimpleNamespace(time=types.SimpleNamespace(Time=lambda: None))
+        self.assertEqual(runtime._corridor_distance(), (False, None))
+
+    def test_obstacle_resume_reissues_the_remaining_path_only_when_clear(self):
+        from carapp.core.sandbox_runtime import ForwardGuard
+        runtime = self.runtime()
+        runtime._guard = ForwardGuard()
+        runtime._guard.blocked = True
+        runtime._traffic_paused = True
+        runtime._pause_source = 'obstacle'
+        runtime._resume_target = (.4, 0., 0.)
+        runtime._resume_path = [(0., 0., 0.), (.1, 0., 0.), (.2, 0., 0.), (.3, 0., 0.)]
+        runtime.goal_epoch = 7
+        runtime.revoked_epoch = 6
+        runtime.lease = dict(allow=True, epoch=7, expires=102.)
+        runtime._ready = lambda: True
+        runtime.goal_handle = None
+        runtime.cancel_future = None
+        runtime._navigation_accept_pending = False
+        runtime._pose = lambda: (0., 0., 0.)
+        runtime._check_road = Mock()
+        runtime._navigate = Mock()
+        runtime._revoke = Mock()
+        runtime._resume_motion(100.)
+        runtime._check_road.assert_not_called()
+        self.assertTrue(runtime._traffic_paused)
+
+        runtime._guard.blocked = False
+        runtime._resume_motion(101.)
+        request, points = runtime._check_road.call_args[0]
+        self.assertTrue(request['internal_resume'])
+        self.assertEqual(points[0], (0., 0., 0.))
+        self.assertEqual(points[1:], [(0., 0., 0.), (.1, 0., 0.), (.2, 0., 0.), (.3, 0., 0.)])
+        self.assertFalse(runtime._traffic_paused)
+
+    def test_resume_skips_path_points_that_sit_behind_the_car(self):
+        runtime = self.runtime()
+        self.assertFalse(runtime._ahead((.2, 0., 0.), (.1, 0., 0.)))
+        self.assertTrue(runtime._ahead((.2, 0., 0.), (.3, 0., 0.)))
+        self.assertTrue(runtime._ahead((.2, 0., 0.), (.2, 0., 0.)))
+
+    def test_blocked_abort_becomes_a_recoverable_pause_instead_of_dead_end(self):
+        """Nav2 aborting on its own used to leave 'blocked' with no way back."""
+        from carapp.core.sandbox_runtime import ForwardGuard
+        runtime = self.runtime()
+        runtime._guard = ForwardGuard()
+        runtime.goal_state = 'checking_blockage'
+        runtime.goal_epoch = 7
+        runtime.revoked_epoch = 6
+        runtime.lease = dict(allow=True, epoch=7, expires=102.)
+        runtime.goal_handle = None
+        runtime.cancel_future = None
+        runtime.last_sent = False
+        runtime._traffic_paused = False
+        runtime._pause_source = ''
+        runtime._resume_target = (1., 2., .3)
+        runtime._resume_path = [(0., 0., 0.), (.1, 0., 0.)]
+        runtime._zero = lambda: None
+        runtime._pose = lambda: (0., 0., 0.)
+        runtime._pause_blocked()
+        self.assertEqual(runtime.goal_state, 'paused')
+        self.assertTrue(runtime._traffic_paused)
+        self.assertEqual(runtime._pause_source, 'obstacle')
+        self.assertIn('自动继续', runtime.detail)
+        self.assertIsNotNone(runtime._resume_target)
+        self.assertGreater(runtime.goal_epoch, runtime.revoked_epoch)
+
+    def test_repeated_blockage_at_the_same_spot_gives_up_with_a_reason(self):
+        from carapp.core.sandbox_runtime import ForwardGuard
+        runtime = self.runtime()
+        runtime._guard = ForwardGuard()
+        runtime.goal_epoch = 7
+        runtime.revoked_epoch = 6
+        runtime.lease = dict(allow=True, epoch=7, expires=102.)
+        runtime.goal_handle = None
+        runtime.cancel_future = None
+        runtime.last_sent = False
+        runtime.revoke_reason = ''
+        runtime._zero = lambda: None
+        runtime._pose = lambda: (2.53, 0.85, .78)
+        runtime._resume_target = (1., 2., .3)
+        for _ in range(4):
+            runtime.goal_state = 'checking_blockage'
+            runtime._pause_blocked()
+        self.assertEqual(runtime.goal_state, 'canceled')
+        self.assertIn('连续受阻', runtime.revoke_reason)
+        self.assertIsNone(runtime._resume_target)
 
     def test_velocity_relay_clamps_speed_and_never_reverses(self):
         runtime = self.runtime()

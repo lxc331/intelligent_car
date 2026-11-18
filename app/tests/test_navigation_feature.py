@@ -216,6 +216,27 @@ class NavigationFeatureTests(unittest.TestCase):
             self.feature.start()
         self.assertFalse(any(call[0][0] == "start" for call in self.session.calls))
 
+    def test_start_sends_corridor_thresholds_with_the_map(self):
+        self.session.state["running"] = False
+        self.feature.speed.set("0.06")
+        with patch("carapp.features.navigation.save_config"), \
+                patch.object(self.feature, "_start_record"):
+            self.feature.start()
+        start = next(call for call in self.session.calls if call[0][0] == "start")
+        avoid = start[1]["avoid"]
+        self.assertTrue(avoid["enabled"])
+        self.assertAlmostEqual(avoid["stop_distance"], .25)
+        self.assertAlmostEqual(avoid["half_width"], .06)
+        self.assertAlmostEqual(avoid["wait_seconds"], 10.)
+
+    def test_paused_for_an_obstacle_keeps_the_session_and_names_the_reason(self):
+        self.feature._handle_event(dict(operation="status", error=None, result=dict(
+            running=True, goal_state="paused", motion_active=True,
+            detail="前方 0.25 米有障碍，已停车等待让行")))
+        self.assertEqual(self.session.cancels, [])
+        self.assertIn("障碍", self.feature._status_text)
+        self.assertFalse(self.feature._status_error)
+
     def test_map_import_completion_uses_predecoded_model_without_ui_map_decode(self):
         model = MapModel()
         model.accept_map(self.bundle.grid_message, time.monotonic())

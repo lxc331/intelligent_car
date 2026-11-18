@@ -6,7 +6,13 @@ def road_parameters(params,root,speed):
         desired_linear_vel=speed,lookahead_dist=.18,min_lookahead_dist=.12,max_lookahead_dist=.25,
         lookahead_time=1.0,use_velocity_scaled_lookahead_dist=False,
         min_approach_linear_velocity=min(.02,speed),approach_velocity_scaling_dist=.12,
-        use_collision_detection=True,max_allowed_time_to_collision_up_to_carrot=1.,
+        # RPP 的代价图碰撞检测在这条 25–27 cm 的走道里一定会失败：车体
+        # footprint 半宽 0.105 m，内切膨胀从离墙 0.115 m 起就是 253 格，
+        # 而走道半宽只有 ~0.125 m，投影轨迹中心稍一偏移就报
+        # "detected collision ahead" 并 Aborting handle（车端 nav2.log 实测）。
+        # 真实障碍由车端前向走廊守卫停车，路径本身已做整车扫掠校验，
+        # ObstacleFootprint 评价项仍会把轨迹往通道中间拉，因此这里关掉。
+        use_collision_detection=False,max_allowed_time_to_collision_up_to_carrot=1.,
         use_regulated_linear_velocity_scaling=True,regulated_linear_scaling_min_radius=.15,
         regulated_linear_scaling_min_speed=min(.02,speed),use_cost_regulated_linear_velocity_scaling=False,
         use_rotate_to_heading=True,rotate_to_heading_angular_vel=.45,rotate_to_heading_min_angle=.15,

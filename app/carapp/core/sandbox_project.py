@@ -33,7 +33,16 @@ class SandboxProject:
 
 
 def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Hash an asset with text newlines normalized before hashing.
+
+    Projects are authored on the car (LF) but also live in a Windows checkout,
+    where ``core.autocrlf`` turns YAML into CRLF. Hashing the normalized bytes
+    keeps one manifest valid on both systems; binary maps keep their exact hash.
+    """
+    path=Path(path);raw=path.read_bytes()
+    if path.suffix.lower() in ('.yaml','.yml','.json'):
+        raw=raw.replace(b'\r\n',b'\n')
+    return hashlib.sha256(raw).hexdigest()
 
 
 def asset_path(root,value):

@@ -152,7 +152,8 @@ def startup():
     raise RuntimeError('Session upload verification failed: '+name)
   env=dict(os.environ,CARAPP_NAV_OWNER=token,ROS_LOG_DIR=str(root/'ros_logs'))
   log=(root/'supervisor.log').open('ab',buffering=0)
-  child=subprocess.Popen(['python3',str(root/'runtime.py'),str(root),token,str(p['speed']),info['vendor_dir']],
+  child=subprocess.Popen(['python3',str(root/'runtime.py'),str(root),token,str(p['speed']),info['vendor_dir'],
+                          json.dumps(p.get('avoid') or {})],
                           stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,
                           env=env,start_new_session=True)
   log.close()

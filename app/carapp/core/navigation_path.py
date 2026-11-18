@@ -17,6 +17,64 @@ def checked_path(points, limit=6000):
     return tuple(result)
 
 
+def project_polyline(path, x, y):
+    """Nearest point on a path: returns (arc length from the start, lateral gap)."""
+    if not path:
+        return 0., 0.
+    if len(path) < 2:
+        return 0., math.hypot(x-path[0][0], y-path[0][1])
+    best_s, best_gap, s = 0., float('inf'), 0.
+    for a, b in zip(path, path[1:]):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        length = math.hypot(dx, dy)
+        if length <= 1e-9:
+            continue
+        t = max(0., min(1., ((x-a[0])*dx + (y-a[1])*dy)/(length*length)))
+        gap = math.hypot(x-(a[0]+t*dx), y-(a[1]+t*dy))
+        if gap < best_gap:
+            best_s, best_gap = s+t*length, gap
+        s += length
+    return best_s, best_gap
+
+
+def corridor_obstacle(points, path, start_s=0., *, half_width=.06, lookahead=.55, behind=.05):
+    """Nearest point inside the driven corridor, measured *along* the path.
+
+    ``points`` are map-frame returns from the laser, ``path`` the route from the
+    car onwards and ``start_s`` where the body currently sits on it. A narrow
+    ``half_width`` keeps the corridor walls out of the verdict: the sandbox
+    road leaves only 2–3 cm beside the body, so a body-wide band would stop the
+    car in every straight. Returns ``(distance, (x, y))`` or ``(None, None)``.
+    """
+    if len(path) < 2 or not points:
+        return None, None
+    segments, s = [], 0.
+    for a, b in zip(path, path[1:]):
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        length = math.hypot(dx, dy)
+        if length > 1e-9 and s+length >= start_s-behind and s <= start_s+lookahead:
+            segments.append((a[0], a[1], dx, dy, length, s))
+        s += length
+    best = None
+    for x, y in points:
+        for ax, ay, dx, dy, length, segment_s in segments:
+            raw = ((x-ax)*dx + (y-ay)*dy)/(length*length)
+            if raw < 0. or raw > 1.:
+                # Outside this segment: the neighbouring one owns the point, and
+                # clamping here would credit a point 6 cm past the end with a
+                # diagonal distance that looks closer than it is.
+                continue
+            if math.hypot(x-(ax+raw*dx), y-(ay+raw*dy)) > half_width:
+                continue
+            ahead = segment_s + raw*length - start_s
+            if ahead < -behind or ahead > lookahead:
+                continue
+            ahead = max(0., ahead)
+            if best is None or ahead < best[0]:
+                best = (ahead, (x, y))
+    return best if best else (None, None)
+
+
 def pose_clear(grid,pose,footprint=(.25,.15,.115),threshold=65):
     """Rectangle vs raster cell SAT, including claw; unknown/outside is blocked."""
     x,y,yaw=pose; ox,oy,oa=grid['origin'];r=grid['resolution']

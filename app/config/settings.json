@@ -1,6 +1,6 @@
 {
   "car": {
-    "host": "192.168.167.118",
+    "host": "192.168.149.1",
     "http_port": 8080,
     "ws_port": 9090,
     "subnet_prefix": "192.168.150",
@@ -8,9 +8,9 @@
       "192.168.150",
       "192.168.149"
     ],
-    "profile_id": "HW-10CCA58E",
-    "transport": "sta",
-    "sta_ssid": "zte-lab"
+    "profile_id": "HW-A0857935",
+    "transport": "wifi",
+    "sta_ssid": ""
   },
   "cars": [
     {
@@ -197,9 +197,9 @@
         "contact_confirmed": true
       },
       "HW-A0857935:red": {
-        "x": 0.5129589145365715,
-        "y": 0.8516298767967145,
-        "width": 0.3234375,
+        "x": 0.5077716455585386,
+        "y": 0.7971133175751917,
+        "width": 0.2828125,
         "host": "HW-A0857935",
         "color": "red",
         "pose": {
@@ -207,7 +207,7 @@
           "yaw": 1500,
           "arm": 1796
         },
-        "created": "2026-10-31 17:08:49",
+        "created": "2026-11-09 16:39:11",
         "version": 2,
         "contact_confirmed": true
       }
@@ -247,7 +247,17 @@
       "rear": 0.09,
       "half": 0.08
     },
-    "sandbox_verify_path": false
+    "sandbox_verify_path": false,
+    "avoid_enabled": true,
+    "avoid_stop_distance": 0.25,
+    "avoid_slow_distance": 0.45,
+    "avoid_clear_distance": 0.32,
+    "avoid_half_width": 0.06,
+    "avoid_lookahead": 0.55,
+    "avoid_reroute_after": 1.0,
+    "avoid_wait_seconds": 10.0,
+    "avoid_give_up_seconds": 0.0,
+    "avoid_max_turn_degrees": 75.0
   },
   "traffic_light": {
     "confidence": 0.5,

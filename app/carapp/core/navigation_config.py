@@ -54,9 +54,24 @@ def navigation_parameters(vendor, controller, map_path, speed):
                     always_send_full_costmap=True, use_sim_time=False)
         cost.pop('robot_radius', None)
         cost.setdefault('inflation_layer', {}).update(inflation_radius=.20, cost_scaling_factor=5.)
-        for layer in ('obstacle_layer', 'voxel_layer'):
-            if layer in cost:
-                cost[layer].setdefault('scan', {}).update(topic='/scan_raw')
+        # 激光障碍层显式写入：vendor 配置里没有这一层时，代价图完全看不到实时
+        # 障碍，Nav2 的碰撞检测和车端净空判定都会落空，避障无从谈起。
+        layer = cost.setdefault('obstacle_layer', {})
+        layer.setdefault('plugin', 'nav2_costmap_2d::ObstacleLayer')
+        layer.update(enabled=True, observation_sources='scan')
+        layer['scan'] = dict(layer.get('scan') or {}, topic='/scan_raw', data_type='LaserScan',
+                             clearing=True, marking=True, max_obstacle_height=2.,
+                             min_obstacle_height=0., obstacle_max_range=2.5,
+                             obstacle_min_range=0., raytrace_max_range=3.,
+                             raytrace_min_range=0.)
+        plugins = [name for name in (cost.get('plugins') or []) if name != 'inflation_layer']
+        if 'obstacle_layer' not in plugins:
+            plugins.append('obstacle_layer')
+        plugins.append('inflation_layer')
+        cost['plugins'] = plugins
+        for name in ('voxel_layer',):
+            if name in cost:
+                cost[name].setdefault('scan', {}).update(topic='/scan_raw')
     smooth = node('velocity_smoother')
     smooth.update(max_velocity=[speed, 0., .35], min_velocity=[0., 0., -.35],
                   max_accel=[.20, 0., .50], max_decel=[-.30, 0., -.50],

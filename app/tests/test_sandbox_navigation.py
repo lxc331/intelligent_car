@@ -86,6 +86,246 @@ class SandboxTests(unittest.TestCase):
             project.path.write_text(json.dumps(meta),encoding='utf8')
             with self.assertRaises(ValueError):load_project(project.path)
 
+    def _blocked_feature(self):
+        import json
+        from carapp.config import DEFAULTS
+        notices, stops = [], []
+
+        class Feature:
+            def __init__(self):
+                self.goal_node = types.SimpleNamespace(id=3)
+                self._stop_requested = False
+                self.goal = None
+                self.model = types.SimpleNamespace(snapshot=lambda: dict(pose=(0., 0., 0.), pose_stale=False))
+                self.ctx = types.SimpleNamespace(cfg=json.loads(json.dumps(DEFAULTS)))
+                self.map_panel = types.SimpleNamespace(set_route=Mock(), set_plan=Mock())
+            def _notice(self, text, error=False):
+                notices.append(text)
+            def _ready(self):
+                return True
+            def _route_goal_pose(self, ids):
+                return (0., 0., 0.)
+            def stop_all(self):
+                stops.append(True)
+                self._stop_requested = True
+
+        return Feature(), notices, stops
+
+    def test_blocked_road_reroutes_then_keeps_waiting_without_cancelling(self):
+        """Moving the obstacle away must still let the retained goal continue."""
+        import time as _time
+        from carapp.core.navigation_avoidance import AvoidancePolicy, AvoidanceSettings
+        from carapp.features.sandbox_navigation import SandboxNavigation
+
+        feature, notices, stops = self._blocked_feature()
+        box = SandboxNavigation(feature)
+        box.policy = AvoidancePolicy(AvoidanceSettings(reroute_after=1., wait_seconds=10.))
+        box.project = types.SimpleNamespace(network=None, metadata={'id': 'x'}, path=Path('offline'))
+        box.route = types.SimpleNamespace(edges=((0, 1),), nodes=(0, 1),
+                                          points=((0., 0., 0.), (.1, 0., 0.)), length=.1)
+        box._running = True
+        clock = [0.]
+        with patch('carapp.features.sandbox_navigation.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('carapp.features.sandbox_navigation.plan_route', side_effect=ValueError('没有可通行的道路路径')):
+            blocked = dict(goal_state='paused', avoid=dict(blocked=True, distance=.2))
+            box.on_status(blocked)
+            self.assertEqual(box.policy.state, 'blocked')
+            clock[0] = 1.1
+            box.on_status(blocked)
+            self.assertEqual(box.policy.state, 'rerouting')
+            for _ in range(200):
+                box.on_background_tick()
+                if box.policy.state == 'waiting':
+                    break
+                _time.sleep(.01)
+            self.assertEqual(box.policy.state, 'waiting')
+            for step in range(2, 40):
+                clock[0] = float(step)
+                box.on_status(blocked)
+            self.assertEqual(box.policy.state, 'waiting')
+            self.assertEqual(stops, [])
+            self.assertEqual(sum(1 for text in notices if '自动继续' in text), 1)
+            self.assertLessEqual(len([text for text in notices if '等待' in text]), 2)
+            # 障碍移开：车端回到 navigating，策略只提示一次并复位
+            clock[0] = 41.
+            box.on_status(dict(goal_state='navigating', avoid=dict(blocked=False)))
+        self.assertEqual(box.policy.state, 'idle')
+        self.assertTrue(any('障碍已让开' in text for text in notices))
+
+    def test_explicit_give_up_still_stops_and_never_restarts_by_itself(self):
+        import time as _time
+        from carapp.core.navigation_avoidance import AvoidancePolicy, AvoidanceSettings
+        from carapp.features.sandbox_navigation import SandboxNavigation
+
+        feature, notices, stops = self._blocked_feature()
+        box = SandboxNavigation(feature)
+        box.policy = AvoidancePolicy(AvoidanceSettings(reroute_after=1., wait_seconds=2., give_up_seconds=10.))
+        box.project = types.SimpleNamespace(network=None, metadata={'id': 'x'}, path=Path('offline'))
+        box.route = types.SimpleNamespace(edges=((0, 1),), nodes=(0, 1),
+                                          points=((0., 0., 0.), (.1, 0., 0.)), length=.1)
+        box._running = True
+        clock = [0.]
+        with patch('carapp.features.sandbox_navigation.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('carapp.features.sandbox_navigation.plan_route', side_effect=ValueError('没有可通行的道路路径')):
+            blocked = dict(goal_state='paused', avoid=dict(blocked=True, distance=.2))
+            box.on_status(blocked)
+            clock[0] = 1.1
+            box.on_status(blocked)
+            for _ in range(200):
+                box.on_background_tick()
+                if box.policy.state == 'waiting':
+                    break
+                _time.sleep(.01)
+            clock[0] = 12.
+            box.on_status(blocked)
+            self.assertTrue(stops)
+            # 停车之后车端可能还在报 paused；不能因此重新开始一轮并被再次取消
+            clock[0] = 13.
+            box.on_status(blocked)
+            box.on_status(blocked)
+        self.assertEqual(stops, [True])
+
+    def test_clear_corridor_restarts_the_route_after_a_blocked_abort(self):
+        """The car can drop its goal on an abort; once clear it needs a new one."""
+        import time as _time
+        from carapp.features.sandbox_navigation import SandboxNavigation
+
+        feature, notices, stops = self._blocked_feature()
+        feature.session = types.SimpleNamespace(submit=Mock(return_value=True))
+        box = SandboxNavigation(feature)
+        box.project = types.SimpleNamespace(network=None, metadata={'id': 'x'}, path=Path('offline'))
+        box.route = types.SimpleNamespace(edges=((0, 1),), nodes=(0, 1),
+                                          points=((0., 0., 0.), (.1, 0., 0.)), length=.1)
+        route = types.SimpleNamespace(points=((0., 0., 0.), (.1, 0., 0.)), nodes=(0, 1), length=.1)
+        clock = [0.]
+        with patch('carapp.features.sandbox_navigation.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('carapp.features.sandbox_navigation.plan_route', return_value=route):
+            box.on_status(dict(goal_state='blocked', avoid=dict(blocked=False)))
+            self.assertTrue(any('重新下发' in text for text in notices))
+            for _ in range(300):
+                box.on_background_tick()
+                if feature.session.submit.called:
+                    break
+                _time.sleep(.01)
+        self.assertTrue(feature.session.submit.called)
+        self.assertEqual(feature.session.submit.call_args[0][0], 'follow_path')
+        self.assertEqual(stops, [])
+
+    def test_resend_gives_up_after_three_failed_attempts(self):
+        import time as _time
+        from carapp.features.sandbox_navigation import SandboxNavigation
+
+        feature, notices, stops = self._blocked_feature()
+        box = SandboxNavigation(feature)
+        box.project = types.SimpleNamespace(network=None, metadata={'id': 'x'}, path=Path('offline'))
+        box.route = types.SimpleNamespace(edges=((0, 1),), nodes=(0, 1),
+                                          points=((0., 0., 0.), (.1, 0., 0.)), length=.1)
+        clock = [0.]
+        with patch('carapp.features.sandbox_navigation.time.monotonic', side_effect=lambda: clock[0]), \
+                patch('carapp.features.sandbox_navigation.plan_route', side_effect=ValueError('没有可通行路径')):
+            for step in range(5):
+                clock[0] = step*3.
+                box.on_status(dict(goal_state='blocked', avoid=dict(blocked=False)))
+                for _ in range(100):
+                    box.on_background_tick()
+                    if not box.busy:
+                        break
+                    _time.sleep(.01)
+        self.assertEqual(box._resend_count, 3)
+        self.assertTrue(any('连续 3 次' in text for text in notices))
+
+    def test_route_that_would_need_a_uturn_is_never_submitted(self):
+        from carapp.config import DEFAULTS
+        from carapp.features.sandbox_navigation import SandboxNavigation
+
+        notices, calls = [], []
+
+        class Session:
+            def submit(self, *args, **kwargs):
+                calls.append(args)
+                return True
+
+        class Feature:
+            def __init__(self):
+                self.goal_node = types.SimpleNamespace(id=3)
+                self._stop_requested = False
+                self.goal = None
+                self.session = Session()
+                self.model = types.SimpleNamespace(snapshot=lambda: dict(pose=(0., 0., 0.), pose_stale=False))
+                self.ctx = types.SimpleNamespace(cfg=json.loads(json.dumps(DEFAULTS)))
+                self.map_panel = types.SimpleNamespace(set_route=Mock(), set_plan=Mock())
+            def _notice(self, text, error=False):
+                notices.append(text)
+            def _ready(self):
+                return True
+            def _route_goal_pose(self, ids):
+                return (0., 0., 0.)
+
+        box = SandboxNavigation(Feature())
+        box.project = types.SimpleNamespace(network=None, metadata={'id': 'x'}, path=Path('offline'))
+        route = types.SimpleNamespace(points=((0., 0., math.pi), (.1, 0., math.pi)),
+                                      nodes=(0, 1), length=.1)
+        self.assertTrue(box._requires_turn(route, (0., 0., 0.)))
+        self.assertFalse(box._requires_turn(types.SimpleNamespace(points=((0., 0., .3),)),
+                                           (0., 0., 0.)))
+        box.events.put((box.epoch, 'route', (route, (0., 0., 0.)), None))
+        box._launch = True
+        box.on_background_tick()
+        self.assertEqual(calls, [])
+        self.assertTrue(any('掉头' in text for text in notices))
+
+    def test_plan_notices_stay_on_the_page_thread(self):
+        """The road planner runs in a worker thread; only the page thread may
+        write the status bar and the shared 操作记录.json."""
+        import threading
+        from carapp.config import DEFAULTS
+        from carapp.features.sandbox_navigation import SandboxNavigation
+
+        notices = []
+
+        class Feature:
+            def __init__(self):
+                self.goal_node = types.SimpleNamespace(id=7)
+                self._stop_requested = False
+                self.model = types.SimpleNamespace(snapshot=lambda: dict(pose=(0., 0., 0.), pose_stale=False))
+                self.ctx = types.SimpleNamespace(cfg=json.loads(json.dumps(DEFAULTS)))
+                self.map_panel = types.SimpleNamespace(set_route=Mock(), set_plan=Mock())
+            def _notice(self, text, error=False):
+                notices.append((threading.current_thread().name, text))
+            def _ready(self):
+                return True
+            def _route_goal_pose(self, ids):
+                return (0., 0., 0.)
+
+        feature = Feature()
+        box = SandboxNavigation(feature)
+        box.project = types.SimpleNamespace(network=None, metadata={}, path=Path("offline"))
+        route = types.SimpleNamespace(points=(), nodes=(7,), length=1.)
+        with patch("carapp.features.sandbox_navigation.plan_route", return_value=route):
+            self.assertTrue(box.plan(preview_start=(0., 0., 0.)))
+            for _ in range(100):
+                box.on_background_tick()
+                if box.route is route:
+                    break
+                threading.Event().wait(.02)
+        self.assertIs(box.route, route)
+        self.assertEqual(len(notices), 3)
+        self.assertEqual({name for name, _ in notices}, {"MainThread"})
+
+    def test_project_checked_out_with_crlf_still_loads(self):
+        """git on Windows rewrites YAML assets to CRLF; the manifest must survive it."""
+        raw=Path(__file__).parents[1]/'savedMap/manual_map/rawMap.yaml'
+        points=[(.5,.52),(1.39,2.87),(2.72,4.88)]
+        with tempfile.TemporaryDirectory() as directory:
+            project=build_project(raw,raw,points,points,Path(directory)/'project')
+            for name in ('map.yaml','roads.yaml','keepout.yaml','road_network.yaml'):
+                path=project.path.parent/name
+                path.write_bytes(path.read_bytes().replace(b'\r\n',b'\n').replace(b'\n',b'\r\n'))
+            load_project(project.path)
+            target=project.path.parent/'map.yaml'
+            target.write_bytes(target.read_bytes()+b'# edited\r\n')
+            with self.assertRaises(ValueError):load_project(project.path)
+
     def test_follow_path_upload_and_cancel_epoch(self):
         remote=FakeRemote();remote.start(MAP)
         ticket=remote.capture_intent()
@@ -164,3 +404,8 @@ class SandboxTests(unittest.TestCase):
         self.assertGreaterEqual(follow['lookahead_dist'],.15)
         self.assertLessEqual(follow['rotate_to_heading_min_angle'],.2)
         self.assertGreaterEqual(follow['rotate_to_heading_angular_vel'],.4)
+        # RPP's costmap collision check cannot pass in a 25–27 cm corridor: the
+        # footprint half-width is 0.105 m, inscribed inflation starts 0.115 m
+        # from a wall and the corridor half-width is only ~0.125 m, so the
+        # projection trips "detected collision ahead" and aborts every goal.
+        self.assertFalse(follow['use_collision_detection'])

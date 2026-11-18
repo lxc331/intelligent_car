@@ -64,6 +64,20 @@ def target_values(x, y, yaw):
     return values
 
 
+def avoid_values(values=None):
+    """Validate the corridor thresholds on the PC before uploading them."""
+    from carapp.core.sandbox_runtime import AVOID_DEFAULTS, ForwardGuard
+    raw = dict(values or {})
+    enabled = bool(raw.get('enabled', True))
+    settings = {name: raw.get(name, default) for name, default in AVOID_DEFAULTS.items()}
+    for key, value in settings.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError('避障参数须为有限数值：' + key)
+    if enabled:
+        ForwardGuard(**settings)
+    return dict(settings, enabled=enabled)
+
+
 class NavigationRemote(MappingRemote):
     """Synchronous foreground methods plus independent leased motion intent.
 
@@ -169,10 +183,11 @@ class NavigationRemote(MappingRemote):
         self._heartbeat_thread = threading.Thread(target=run,name='navigation-lease',daemon=True)
         self._heartbeat_thread.start()
 
-    def start(self, map_bundle, speed=.06):
+    def start(self, map_bundle, speed=.06, avoid=None):
         speed = float(speed)
         if not math.isfinite(speed) or not .02 <= speed <= .15:
             raise ValueError('导航速度应在 0.02–0.15 m/s')
+        avoid = avoid_values(avoid)
         files = validate_bundle(map_bundle)
         folder = Path(__file__).parent
         files['runtime.py'] = (folder/'navigation_runtime.py').read_bytes()
@@ -213,7 +228,7 @@ class NavigationRemote(MappingRemote):
                         if answer.get('written') != len(chunk):
                             raise NavigationRemoteError('导航文件上传未完成：'+name)
                     descriptors[name] = dict(size=len(raw),sha256=hashlib.sha256(raw).hexdigest())
-                return self._remote('start',timeout=38,files=descriptors,speed=speed)
+                return self._remote('start',timeout=38,files=descriptors,speed=speed,avoid=avoid)
             except Exception:
                 self._disallow()
                 try:
@@ -259,7 +274,10 @@ class NavigationRemote(MappingRemote):
                 raise ValueError('起点需要 x/y/yaw 三个数值') from None
             if len(start) != 3:
                 raise ValueError('起点需要 x/y/yaw 三个数值')
-            values['start'] = target_values(*start)
+            # The car reads the start pose as an ordered [x, y, yaw] array. A JSON
+            # object would reach it as keys and fail the numeric check.
+            origin = target_values(*start)
+            values['start'] = [origin['x'],origin['y'],origin['yaw']]
         with self._lock:
             return self._remote('plan',values=values,epoch=self.capture_intent(),
                                 request_timeout=18,timeout=21)

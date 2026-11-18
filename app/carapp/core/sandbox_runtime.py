@@ -8,6 +8,93 @@ import uuid
 # angle is normal. Only a genuinely backwards start is refused.
 START_HEADING_TOLERANCE = 1.4
 
+# Front-corridor clearance defaults, measured from base_footprint along the
+# driven path. stop 0.25 m leaves ~5 cm in front of the 0.20 m body nose.
+AVOID_DEFAULTS = dict(stop_distance=.25, slow_distance=.45, clear_distance=.32,
+                      half_width=.06, lookahead=.55, hold=.25, release=.5)
+
+
+class ForwardGuard:
+    """Decide whether the corridor ahead is clear, with stop/clear hysteresis.
+
+    The caller measures the corridor distance every tick (``None`` when nothing
+    sits inside it), so this stays free of ROS and testable offline. It never
+    commands motion: it reports a verdict and a speed scale only.
+    """
+
+    def __init__(self, stop_distance=.25, slow_distance=.45, clear_distance=.32,
+                 half_width=.06, lookahead=.55, hold=.25, release=.5):
+        values = dict(stop_distance=stop_distance, slow_distance=slow_distance,
+                      clear_distance=clear_distance, half_width=half_width,
+                      lookahead=lookahead, hold=hold, release=release)
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError('避障参数须为有限数值：%s' % name)
+        if not .10 <= stop_distance <= .40:
+            raise ValueError('停车距离须在 0.10–0.40 米')
+        if not stop_distance + .05 <= slow_distance <= 1.0:
+            raise ValueError('减速距离须比停车距离大 0.05 米以上，且不超过 1.0 米')
+        if not stop_distance <= clear_distance <= slow_distance:
+            raise ValueError('恢复距离须在停车与减速距离之间')
+        if not .03 <= half_width <= .15:
+            raise ValueError('走廊半宽须在 0.03–0.15 米')
+        if not .25 <= lookahead <= 1.2:
+            raise ValueError('前视距离须在 0.25–1.2 米')
+        if not 0. <= hold <= 2.:
+            raise ValueError('阻挡确认时间须在 0–2 秒')
+        if not 0. <= release <= 3.:
+            raise ValueError('恢复确认时间须在 0–3 秒')
+        self.stop_distance, self.slow_distance, self.clear_distance = stop_distance, slow_distance, clear_distance
+        self.half_width, self.lookahead = half_width, lookahead
+        self.hold, self.release = hold, release
+        self.reset()
+
+    def reset(self):
+        self.blocked = False
+        self.distance = None
+        self.since = 0.
+        self._hit_at = None
+        self._clear_at = None
+
+    def update(self, distance, now):
+        """Feed one corridor measurement; returns the latched blocked state."""
+        if distance is not None:
+            distance = max(0., float(distance))
+        self.distance = distance
+        if distance is not None and distance <= self.stop_distance:
+            self._clear_at = None
+            if self._hit_at is None:
+                self._hit_at = now
+            if not self.blocked and now - self._hit_at >= self.hold:
+                self.blocked, self.since = True, now
+            return self.blocked
+        self._hit_at = None
+        if not self.blocked:
+            return False
+        if distance is None or distance >= self.clear_distance:
+            if self._clear_at is None:
+                self._clear_at = now
+            elif now - self._clear_at >= self.release:
+                self.blocked, self.since, self._clear_at = False, 0., None
+        else:
+            # Lingering inside the hysteresis band: keep the stop latched.
+            self._clear_at = None
+        return self.blocked
+
+    @property
+    def speed_scale(self):
+        """Scale for the commanded speed: 0 while blocked, ramp on approach."""
+        if self.blocked:
+            return 0.
+        if self.distance is None or self.distance >= self.slow_distance:
+            return 1.
+        span = self.slow_distance - self.stop_distance
+        return max(0., min(1., (self.distance-self.stop_distance)/span)) if span > 0 else 1.
+
+    def view(self):
+        return dict(blocked=self.blocked, distance=self.distance, since=self.since)
+
+
 
 def yaw_of(q):
     return math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
@@ -133,8 +220,30 @@ class RoadRuntime:
                     origin=(o.position.x,o.position.y,yaw_of(o.orientation)),data=cost.data)
                 for point in path[index:]:
                     if not pose_clear(grid,point,self.path_footprint,254):
-                        self.blocked_at=point[:2];self.goal_state='blocked'
-                        self.detail='道路受阻，已停车；检查备用道路';break
+                        self.blocked_at=point[:2];self._pause_blocked();break
             except Exception:pass
         future.add_done_callback(inspect)
+
+    def _pause_blocked(self,detail='前方道路受阻，已停车；净空恢复后自动继续'):
+        """Turn Nav2's own "road blocked" abort into a wait the guard resumes.
+
+        Without this the owner stayed in the dead 'blocked' state: the target,
+        the remaining path and the motion grant were already dropped, so even
+        after the obstacle was removed nothing could move again.
+        """
+        pose=self._pose()
+        previous=getattr(self,'_blocked_pose',None)
+        if pose and previous and math.dist(pose[:2],previous)>.10:
+            self._blocked_count=0
+        self._blocked_pose=pose[:2] if pose else previous
+        self._blocked_count=getattr(self,'_blocked_count',0)+1
+        if self._blocked_count>3:
+            self._revoke('同一位置连续受阻，已停车；请人工处理后再点开始导航')
+            return
+        self.goal_state='paused'
+        self._traffic_paused=True
+        self._pause_source='obstacle'
+        self.command=None
+        self._zero()
+        self.detail=detail
 

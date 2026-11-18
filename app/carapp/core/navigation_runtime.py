@@ -26,14 +26,36 @@ def yaw_of(q):
     return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
 
 
+def start_pose(values):
+    """Read an optional planner start pose: ordered [x, y, yaw] or legacy object.
+
+    The desktop sends an array; an older build sent {"x", "y", "yaw"}. Both are
+    accepted so a mismatched pair still previews a route instead of failing.
+    """
+    start = values.get('start')
+    if start is None:
+        return None
+    if isinstance(start, dict):
+        start = [start.get(name) for name in ('x', 'y', 'yaw')]
+    if not isinstance(start, (list, tuple)) or len(start) != 3:
+        raise ValueError('起点需要 x/y/yaw 三个数值')
+    try:
+        start = tuple(float(value) for value in start)
+    except (TypeError, ValueError):
+        raise ValueError('起点需要 x/y/yaw 三个数值') from None
+    if not all(math.isfinite(value) for value in start):
+        raise ValueError('起点坐标必须是有限数值')
+    return start
+
+
 try:
-    from road_runtime import RoadRuntime
+    from road_runtime import RoadRuntime, ForwardGuard, AVOID_DEFAULTS
 except ModuleNotFoundError:
-    from carapp.core.sandbox_runtime import RoadRuntime
+    from carapp.core.sandbox_runtime import RoadRuntime, ForwardGuard, AVOID_DEFAULTS
 
 
 class NavigationRuntime(RoadRuntime):
-    def __init__(self, root, token, speed, vendor_dir):
+    def __init__(self, root, token, speed, vendor_dir, avoid=None):
         import rclpy
         from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
         from sensor_msgs.msg import LaserScan
@@ -88,7 +110,15 @@ class NavigationRuntime(RoadRuntime):
         self.command_at = 0.
         self.last_sent = False
         self._traffic_paused = False
+        self._pause_source = ''
         self._resume_target = None
+        self._scan_data = None
+        self._scan_points_at = 0.
+        requested = dict(AVOID_DEFAULTS)
+        requested.update({name: value for name, value in (avoid or {}).items() if name in requested})
+        self.avoid_enabled = bool((avoid or {}).get('enabled', True))
+        self._guard = ForwardGuard(**requested) if self.avoid_enabled else None
+        self._avoid_view = dict(blocked=False, distance=None, since=0.)
         self._navigation_accept_pending = False
         self.detail = '导航服务启动中；请标记小车初始位置与朝向'
         self.pending = {}
@@ -141,6 +171,8 @@ class NavigationRuntime(RoadRuntime):
     def _scan(self, message):
         self.scan_at = time.monotonic()
         self.laser_frame = message.header.frame_id.lstrip('/')
+        self._scan_data = (message.ranges, float(message.angle_min), float(message.angle_increment),
+                           float(message.range_min), float(message.range_max))
 
     def _odom(self, message):
         self.odom_at = time.monotonic()
@@ -247,6 +279,72 @@ class NavigationRuntime(RoadRuntime):
             reasons.append('navigator')
         return reasons
 
+    def _corridor_distance(self):
+        """Return ``(measured, distance)`` for the corridor in front of the car.
+
+        ``measured`` is False when the scan, pose, TF or path is not available:
+        an unmeasurable corridor must never be reported as clear, otherwise the
+        stop latch would release on a dropped TF lookup.
+        """
+        try:
+            from path_rules import corridor_obstacle, project_polyline
+        except ImportError:
+            from carapp.core.navigation_path import corridor_obstacle, project_polyline
+        guard = getattr(self, '_guard', None)
+        data, path = getattr(self, '_scan_data', None), self.path
+        if not guard or not data or len(path) < 2 or not self.laser_frame:
+            return False, None
+        pose = self._pose()
+        if not pose:
+            return False, None
+        try:
+            transform = self.tf.lookup_transform('map', self.laser_frame, self.rclpy.time.Time())
+        except Exception:
+            return False, None
+        translation, rotation = transform.transform.translation, transform.transform.rotation
+        yaw = yaw_of(rotation)
+        c, s = math.cos(yaw), math.sin(yaw)
+        ranges, angle_min, increment, range_min, range_max = data
+        points = []
+        try:
+            for index, value in enumerate(ranges):
+                if isinstance(value, bool) or not isinstance(value, float):
+                    continue
+                if not math.isfinite(value) or not range_min <= value <= range_max:
+                    continue
+                angle = angle_min + index * increment
+                px, py = value * math.cos(angle), value * math.sin(angle)
+                points.append((translation.x + c * px - s * py, translation.y + s * px + c * py))
+        except (TypeError, ValueError):
+            return False, None
+        start_s, _ = project_polyline(path, pose[0], pose[1])
+        distance, _ = corridor_obstacle(points, path, start_s,
+                                        half_width=guard.half_width, lookahead=guard.lookahead)
+        return True, distance
+
+    def _drive_avoidance(self, now):
+        """Latch the corridor verdict and pause/resume the retained goal."""
+        guard = getattr(self, '_guard', None)
+        if not guard:
+            return
+        if self.goal_state not in ('navigating', 'paused'):
+            guard.reset()
+            self._avoid_view = dict(blocked=False, distance=None, since=0.)
+            return
+        if now - self.scan_at >= .7 or not self.path:
+            guard.reset()
+            self._avoid_view = dict(blocked=False, distance=None, since=0.)
+            return
+        measured, distance = self._corridor_distance()
+        if not measured:
+            return
+        guard.update(distance, now)
+        self._avoid_view = guard.view()
+        if guard.blocked and self.goal_state == 'navigating':
+            self._pause_motion('前方 %.2f 米有障碍，已停车等待让行' % (guard.distance or 0.), 'obstacle')
+        elif not guard.blocked and self.goal_state == 'paused' and getattr(self, '_pause_source', '') == 'obstacle':
+            self._resume_motion(now)
+
     def _write_state(self):
         pose = self._pose()
         ready = self._ready()
@@ -258,6 +356,8 @@ class NavigationRuntime(RoadRuntime):
                                    self.goal_state in ('accepted','navigating','canceling','paused')),
                motion_active=self.goal_state in ('accepted','navigating','canceling','paused'),
                path=self.path, distance_remaining=self.distance_remaining,
+               avoid=dict(enabled=bool(getattr(self, '_guard', None)),
+                          **getattr(self, '_avoid_view', dict(blocked=False, distance=None, since=0.))),
                route_id=getattr(self,'route_id',None),blocked_at=getattr(self,'blocked_at',None),
                detail=self.detail, temporary_paths=[str(self.root / name) for name in
                  ('owner.json','lease.json','intent.lock','runtime.py','config_builder.py',
@@ -278,6 +378,7 @@ class NavigationRuntime(RoadRuntime):
         self._resume_path = None
         self._resume_target = None
         self._traffic_paused = False
+        self._pause_source = ''
         self.revoked_epoch = max(self.revoked_epoch, self.goal_epoch)
         if self.goal_handle:
             try:
@@ -300,30 +401,39 @@ class NavigationRuntime(RoadRuntime):
     def _traffic_holds(self):
         return bool(self.lease.get('paused') and self.lease.get('traffic_enabled', True))
 
-    def _pause_for_traffic(self):
+    def _pause_motion(self, reason, source):
         """Stop the relay and suspend Nav2 so its progress timer cannot expire.
 
         Retain only this goal's target and authorization epoch. Explicit stop,
         stale lease, failed localization or shutdown clears the retained target.
+        ``source`` keeps the two independent holds apart: a red light and an
+        obstacle may both clear at a different moment.
         """
         self._traffic_paused = True
+        self._pause_source = source
         self.goal_state = 'paused'
         self.command = None
         self._zero()
-        self.detail = self.lease.get('pause_reason') or '正前方红灯，导航等待通行'
+        self.detail = reason
         if self.goal_handle and self.cancel_future is None:
             try:
                 self.cancel_future = self.goal_handle.cancel_goal_async()
             except Exception:
                 self._revoke('暂停导航失败，已取消；需重新点击开始')
 
-    def _resume_after_traffic(self, now):
+    def _pause_for_traffic(self):
+        self._pause_motion(self.lease.get('pause_reason') or '正前方红灯，导航等待通行', 'traffic')
+
+    def _resume_motion(self, now):
         if not getattr(self, '_traffic_paused', False):
             return
         if getattr(self, 'quitting', False) or not self._lease_grants_goal(now) or not self._ready():
-            self._revoke('等待红灯期间控制租约、定位或传感器失效，已取消导航')
+            self._revoke('等待期间控制租约、定位或传感器失效，已取消导航')
             return
         if self._traffic_holds():
+            return
+        guard = getattr(self, '_guard', None)
+        if getattr(self, '_pause_source', '') == 'obstacle' and guard and guard.blocked:
             return
         if self.goal_handle or getattr(self, '_navigation_accept_pending', False):
             return
@@ -332,14 +442,33 @@ class NavigationRuntime(RoadRuntime):
             self._revoke('暂停目标已失效，请重新点击开始导航')
             return
         self._traffic_paused = False
+        self._pause_source = ''
         try:
             path=getattr(self,'_resume_path',None)
             if path:
                 pose=self._pose(); index=min(range(len(path)),key=lambda i:math.dist(pose[:2],path[i][:2]))
-                self._check_road(dict(epoch=self.goal_epoch,internal_resume=True),[pose]+list(path[index:]))
+                remaining=list(path[index:])
+                # The nearest point can sit behind the body; keeping it would make
+                # _check_road read the resume as a backwards start and kill the
+                # retained goal exactly when the road has just cleared.
+                while len(remaining)>1 and not self._ahead(pose,remaining[0]):
+                    remaining.pop(0)
+                self._check_road(dict(epoch=self.goal_epoch,internal_resume=True),[pose]+remaining)
             else:self._navigate(dict(epoch=self.goal_epoch, internal_resume=True), target)
         except Exception:
             self._revoke('恢复导航失败，已取消；需重新点击开始')
+
+    @staticmethod
+    def _ahead(pose, point):
+        """True when ``point`` is not behind the car's current heading."""
+        dx, dy = point[0]-pose[0], point[1]-pose[1]
+        if math.hypot(dx, dy) < .01:
+            return True
+        angle = math.atan2(math.sin(math.atan2(dy, dx)-pose[2]), math.cos(math.atan2(dy, dx)-pose[2]))
+        return abs(angle) <= math.pi/2
+
+    def _resume_after_traffic(self, now):
+        self._resume_motion(now)
 
     def _drive(self):
         from geometry_msgs.msg import Twist
@@ -370,6 +499,13 @@ class NavigationRuntime(RoadRuntime):
                 speed = math.hypot(command[0], command[1])
                 ratio = min(1., limit / speed) if speed else 1.
                 command = tuple(value * ratio for value in command)
+            guard = getattr(self, '_guard', None)
+            if guard:
+                # Approach ramp: never arrive at the stop distance at full speed,
+                # and never rotate in place while the corridor is blocked.
+                scale = guard.speed_scale
+                if scale < 1.:
+                    command = tuple(value * scale for value in command)
             message = Twist()
             message.linear.x, message.linear.y, message.angular.z = command
             self.base.publish(message)
@@ -380,7 +516,7 @@ class NavigationRuntime(RoadRuntime):
     def _maintain(self):
         now = time.monotonic()
         if self.goal_state=='checking_blockage' and now>getattr(self,'_blockage_deadline',0.):
-            self.goal_state='aborted';self.detail='道路检查超时，已停车；请重新规划'
+            self._pause_blocked('道路受阻检查超时，已停车；净空恢复后自动继续')
         try:
             lease = json.loads((self.root / 'lease.json').read_text())
             if int(lease['epoch']) >= int(self.lease['epoch']):
@@ -404,6 +540,7 @@ class NavigationRuntime(RoadRuntime):
         if self.launch and self.launch.poll() is not None:
             self._revoke('Nav2 进程已退出')
             self.quitting = True
+        self._drive_avoidance(now)
         self._resume_after_traffic(now)
         self._flush_pending_initial(now)
         for path in sorted(self.root.glob('*.request.json'))[:8]:
@@ -512,13 +649,7 @@ class NavigationRuntime(RoadRuntime):
         target = tuple(float(values[name]) for name in ('x','y','yaw'))
         if not all(math.isfinite(value) for value in target):
             raise ValueError('目标坐标必须是有限数值')
-        start = values.get('start')
-        if start is not None:
-            if not isinstance(start,(list,tuple)) or len(start) != 3:
-                raise ValueError('起点需要 x/y/yaw 三个数值')
-            start = tuple(float(value) for value in start)
-            if not all(math.isfinite(value) for value in start):
-                raise ValueError('起点坐标必须是有限数值')
+        start = start_pose(values)
         if operation == 'initial_pose':
             if self.goal_handle:
                 raise RuntimeError('导航期间不能重设定位')
@@ -602,6 +733,11 @@ class NavigationRuntime(RoadRuntime):
         epoch = int(request['epoch'])
         self.goal_epoch = epoch
         self._resume_target = target
+        if getattr(self, '_pause_source', '') == 'obstacle':
+            # A fresh route supersedes an obstacle stop; the guard re-evaluates
+            # the new corridor on its next tick and pauses again if it is blocked.
+            self._traffic_paused = False
+            self._pause_source = ''
         self._navigation_accept_pending = True
         self.goal_state = 'accepted'
         self.command = None
@@ -650,16 +786,24 @@ class NavigationRuntime(RoadRuntime):
                                        'aborted':'导航失败，请检查通路或定位'}.get(self.goal_state,'导航异常结束')
                     except Exception:
                         self.goal_state, self.detail = 'error', '导航结果读取失败'
-                    self.revoked_epoch = max(self.revoked_epoch,epoch)
-                    self._resume_target = None
-                    self._resume_path = None
+                    # A path goal that Nav2 aborts on its own is usually "the
+                    # road is blocked", not a finished intent: keep the target,
+                    # the remaining path and the motion grant so the corridor
+                    # guard can resume once the way is clear again.
+                    blocked_abort = bool(code == 6 and path and getattr(self, 'avoid_enabled', False))
+                    if not blocked_abort:
+                        self.revoked_epoch = max(self.revoked_epoch,epoch)
+                        self._resume_target = None
+                        self._resume_path = None
                     self._traffic_paused = False
+                    self._pause_source = ''
                     self.goal_handle = None
                     self.cancel_future = None
                     self.command = None
                     if self.last_sent:
                         self._zero()
-                    if code==6 and path:self._inspect_blockage(epoch,path)
+                    if blocked_abort:
+                        self._inspect_blockage(epoch,path)
                 handle.get_result_async().add_done_callback(finished)
             except Exception as exc:
                 self._navigation_accept_pending = False
@@ -697,10 +841,11 @@ class NavigationRuntime(RoadRuntime):
 def main():
     import rclpy
     root, token, speed, vendor = Path(sys.argv[1]), sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    avoid = json.loads(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5].strip() else {}
     runtime = None
     rclpy.init(args=['--ros-args','--disable-external-lib-logs'])
     try:
-        runtime = NavigationRuntime(root, token, speed, vendor)
+        runtime = NavigationRuntime(root, token, speed, vendor, avoid)
         runtime._write_state()
         while rclpy.ok() and not runtime.quitting:
             rclpy.spin_once(runtime.node, timeout_sec=.05)

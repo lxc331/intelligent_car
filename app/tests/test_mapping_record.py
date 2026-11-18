@@ -59,6 +59,32 @@ class MappingRecordTests(unittest.TestCase):
             self.assertFalse(camera.recording)
             self.assertEqual(camera.stops, 1)
 
+    def test_concurrent_events_from_a_worker_thread_never_fail(self):
+        """The page thread and a planning worker both write; one .tmp per writer.
+
+        A failed write used to reach the caller's OSError handler and stop the
+        car, so a harmless overlap cancelled navigation right after it started.
+        """
+        import threading
+        with tempfile.TemporaryDirectory() as folder:
+            record = MappingRecord(folder, Camera(), ("car", "host"))
+            errors = []
+
+            def spam(name):
+                for index in range(120):
+                    try:
+                        record.event("%s-%d" % (name, index))
+                    except OSError as exc:
+                        errors.append(str(exc))
+
+            threads = [threading.Thread(target=spam, args=("线程%d" % n,)) for n in range(4)]
+            [thread.start() for thread in threads]
+            [thread.join() for thread in threads]
+            self.assertEqual(errors, [])
+            report = json.loads((Path(folder)/"操作记录.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(report["events"]), 1 + 4 * 120)
+            self.assertEqual([p.name for p in Path(folder).glob("*.tmp")], [])
+
 
 if __name__ == "__main__":
     unittest.main()

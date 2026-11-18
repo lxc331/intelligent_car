@@ -11,7 +11,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, ttk
 
-from carapp.config import APP_DIR, save_config
+from carapp.config import APP_DIR, avoid_settings, save_config
 from carapp.core.credentials import local_password
 from carapp.core.laser_scan import LaserMonitor
 from carapp.core.map_data import MapModel
@@ -318,6 +318,9 @@ class NavigationFeature(Feature):
                 self._record.event(str(text))
             except OSError as exc:
                 self.ctx.log("导航记录写入失败：" + str(exc))
+                # 记录写不进去就不再继续开车，但必须把原因留在界面上，
+                # 否则表现成“点开始导航后自己取消”，现场无从判断。
+                self._status_text, self._status_error = "导航记录写入失败，已停止导航：%s" % exc, True
                 self.stop_all()
 
     def import_map(self, path=None):
@@ -531,7 +534,7 @@ class NavigationFeature(Feature):
             save_config(self.ctx.cfg)
             upload = self.sandbox.project.upload() if self.sandbox.project else self.bundle.as_upload()
             self._start_record()
-            if not self.session.submit("start", upload, speed=speed):
+            if not self.session.submit("start", upload, speed=speed, avoid=avoid_settings(self.ctx.cfg)):
                 self._finish_record()
                 return self._notice("导航服务正在处理操作，请稍后重试。", True)
             self._reset_pose()
@@ -832,11 +835,15 @@ class NavigationFeature(Feature):
         if phase and phase != self._last_goal_state:
             self._last_goal_state = phase
             labels = {"navigating": "正在前往目标", "succeeded": "已到达目标", "canceled": "导航已取消",
-                      "aborted": "导航失败，车辆已停", "error": "导航异常，车辆已停"}
+                      "aborted": "导航失败，车辆已停", "error": "导航异常，车辆已停",
+                      "paused": "导航暂停，等待通行"}
             if phase in labels:
                 detail = str(result.get("detail") or "").strip()
                 text = labels[phase]
-                if phase in ("canceled", "aborted", "error") and detail and detail != text:
+                if phase == "paused":
+                    # 车端的 detail 已经写清是红灯还是障碍、距离多少。
+                    text = detail or text
+                elif phase in ("canceled", "aborted", "error") and detail and detail != text:
                     text = "%s：%s" % (text, detail)
                 self._notice(text, phase in ("aborted", "error"))
                 self._keyframe(phase)

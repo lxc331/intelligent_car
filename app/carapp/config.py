@@ -167,6 +167,22 @@ DEFAULTS = {
         "sandbox_footprint": {"front": .19, "rear": .09, "half": .08},
         # 车端是否在发车前用实时代价图复核整条路径；默认关闭，避免窄道被误判。
         "sandbox_verify_path": False,
+        # 导航避障：车端按"沿路径的前向走廊"判净空并停车等待，电脑端优先
+        # 从当前位置重规划绕行、无替代道路时才等。距离都以 base_footprint
+        # 为起点沿路径计；half_width 只覆盖行车中线窄带（走道两侧墙不算障碍）。
+        "avoid_enabled": True,
+        "avoid_stop_distance": .25,
+        "avoid_slow_distance": .45,
+        "avoid_clear_distance": .32,
+        "avoid_half_width": .06,
+        "avoid_lookahead": .55,
+        # 障碍稳定多久才尝试绕行；等待多久后升级一次提示（不取消导航）
+        "avoid_reroute_after": 1.0,
+        "avoid_wait_seconds": 10.,
+        # 0 = 一直等待（推荐：障碍移开后自动续跑）；>0 才在等这么久后停车放弃
+        "avoid_give_up_seconds": 0.,
+        # 新路线首段与当前车头最大夹角，超过就是"要求掉头"，直接判无路
+        "avoid_max_turn_degrees": 75.,
     },
     "traffic_light": {
         # 全帧之外再对七块区域裁切放大后推理：640x480 里一盏灯只有十几到
@@ -281,6 +297,37 @@ def sandbox_footprint(cfg, padding=.01):
     half = number("half", .08)
     pad = max(0.0, float(padding))
     return (front + pad, rear + pad, half + pad)
+
+
+def avoid_settings(cfg):
+    """导航避障参数：车端净空阈值 + 电脑端处置时限。
+
+    越界的数值直接退回默认值，不让一处手改配置把整次导航拦在启动前；
+    真正生效前的合法性由车端 ForwardGuard 与电脑端 AvoidanceSettings 再校验。
+    """
+    from carapp.core.sandbox_runtime import AVOID_DEFAULTS, ForwardGuard
+    navigation = (cfg or {}).get("navigation") or {}
+    def number(key, fallback):
+        try:
+            value = float(navigation.get(key, fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if math.isfinite(value) else fallback
+    settings = dict(enabled=bool(navigation.get("avoid_enabled", True)),
+                    stop_distance=number("avoid_stop_distance", .25),
+                    slow_distance=number("avoid_slow_distance", .45),
+                    clear_distance=number("avoid_clear_distance", .32),
+                    half_width=number("avoid_half_width", .06),
+                    lookahead=number("avoid_lookahead", .55),
+                    reroute_after=number("avoid_reroute_after", 1.0),
+                    wait_seconds=number("avoid_wait_seconds", 10.),
+                    give_up_seconds=number("avoid_give_up_seconds", 0.),
+                    max_turn=math.radians(number("avoid_max_turn_degrees", 75.)))
+    try:
+        ForwardGuard(**{name: settings.get(name, default) for name, default in AVOID_DEFAULTS.items()})
+    except ValueError:
+        settings.update(AVOID_DEFAULTS)
+    return settings
 
 
 def load_config(path=CONFIG_PATH):
