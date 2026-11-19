@@ -1,4 +1,13 @@
-# Basic manual control also works without these optional feature dependencies.
+# 全部依赖：装完即可开箱使用所有功能（遥控/夹取/终端/建图/导航/红绿灯/
+# 视觉检测/车道线/网页后端）。安装与启动必须用同一个 Python 环境。
+#
+#   python -m pip install -r requirements.txt
+#
+# torch 默认从 PyPI 装 **CPU 版**（能跑，速度慢）。有 NVIDIA 显卡时先装 CUDA 版，
+# 再执行上面的命令（否则 pip 会装成 CPU 版覆盖掉）：
+#   python -m pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 \
+#       --index-url https://download.pytorch.org/whl/cu124
+Flask>=3,<4
 Pillow>=10
 paramiko>=3.4,<6
 pyte>=0.8.2,<0.9
@@ -6,3 +15,7 @@ PyYAML>=6,<7
 numpy>=2,<3
 openvino>=2025.4,<2027
 sounddevice>=0.5,<1
+# 视觉检测（YOLOv8）与车道线检测（UFLD v1/v2）都依赖 torch。
+torch>=2.6,<3
+torchvision>=0.21,<1
+ultralytics>=8.3,<9

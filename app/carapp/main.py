@@ -28,6 +28,7 @@ from carapp.core.connection_profiles import (apply_connection, get_profile, plan
                                              TRANSPORT_LABELS)  # noqa: E402
 from carapp.core.credentials import local_password  # noqa: E402
 from carapp.core.vehicle_identity import verify_vehicle_identity  # noqa: E402
+from carapp.core.vision import VisionDetector  # noqa: E402
 from carapp.features import FEATURES  # noqa: E402
 from carapp.features.base import AppContext  # noqa: E402
 from carapp.features.traffic_light import TrafficLightControl  # noqa: E402
@@ -79,6 +80,7 @@ class App:
         # “点了没反应”。统一转进日志面板，现场才能看到原因。
         self.root.report_callback_exception = self._report_ui_error
 
+        self.vision = self._build_vision(cfg)
         self.traffic_light = TrafficLightControl(self.ctx)
 
         self._build_ui()
@@ -93,6 +95,22 @@ class App:
         self._recover_timer = self.root.after(5000, self._auto_recover)
 
     # ---------------- 界面 ----------------
+    def _build_vision(self, cfg):
+        """Standalone YOLOv8 detector; weights load on the first frame.
+
+        Kept independent of every feature on purpose: the traffic-light
+        interlock owns its own OpenVINO detector, so a vision fault can never
+        change a stop decision. Features reach this instance through
+        ``ctx.app.vision``; nothing is subscribed to it yet.
+        """
+        try:
+            detector = VisionDetector.from_config(cfg.get("vision"))
+        except (TypeError, ValueError) as exc:
+            self.log("视觉配置无效，改用默认值：%s" % exc)
+            detector = VisionDetector()
+        self.log("视觉模块：%s" % detector.describe())
+        return detector
+
     def _build_ui(self):
         self.topbar = TopBar(self.root, self)
         self.topbar.pack(fill="x")

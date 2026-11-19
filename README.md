@@ -43,7 +43,7 @@
 python -m pip install -r app/requirements.txt
 ```
 
-安装依赖和启动程序应使用同一个 Python 环境。基础手动控制可不安装这些可选依赖：缺少 Pillow 时视频使用 PNG/Tk 模式，视觉追踪不可用；缺少 Paramiko 或 pyte 时集成终端不可用；缺少 NumPy 或 OpenVINO 时红绿灯功能不可用，开启时会提示缺少的依赖。
+安装依赖和启动程序应使用同一个 Python 环境。`requirements.txt` 已包含全部功能所需依赖，直接整份安装即可；下面是缺某个依赖时受影响的功能，供排查用：缺少 Pillow 时视频使用 PNG/Tk 模式，视觉追踪不可用；缺少 Paramiko 或 pyte 时集成终端不可用；缺少 NumPy 或 OpenVINO 时红绿灯功能不可用，开启时会提示缺少的依赖。
 
 ### 2. 连接小车
 
@@ -271,6 +271,25 @@ API Key 仅保留到本次 App 退出，不写入配置、历史文件或运行�
 **用斑马线像素行停车（`CrosswalkApproach`，2026-10-29 标定）**：停车位前视看不到斑马线（近处那条已经出画面下沿），所以判停不能只靠"到这里就停"，改成**视觉触发 + 里程计收尾**：前视 1500 视角下，近处斑马线下沿像素行与离停止线距离的关系实测为 `距离 ≈ 1.36125 − 0.002220 × 行号`（0.53 m→378、0.42 m→418、0.31 m→476）；行号到 `junction.row_trigger`（470，约 0.32 m）时切 `crawl_speed` 爬行，再按里程计走满 `junction.finish_travel`（0.22 m）就锁停。参数在 `junction` 段的 `row_slope` / `row_intercept` / `row_trigger` / `finish_travel`，换车或换镜头角度后需要重标。
 
 **里程计是"指令积分"，不是轮速反馈（重要）**：车端 `/odom` 由厂家 `odom_publisher_node.py` 的 `cal_odom_fun()` 用 `cmd_vel` 的 `linear_x * dt`、`angular_z * dt` 累加得到，没有读轮子编码器，也**完全忽略 `linear_y`**（横移时 `/odom` 不动）。因此：① `/odom` 不能当真实位移，只能当"指令走了多少"；② 实测真实速度约是指令速度的 1.87 倍（指令 0.06 m/s → 实际 0.112 m/s，用车前路障 + 雷达量得），代码里用 `junction.speed_scale` 把指令里程换算成真实米数后再比较 `finish_travel`；③ 航向保持只能保持"指令航向"，真实跑偏要靠视觉/雷达，不能只看 `/odom` 的 yaw。
+
+### 通用视觉模块（原生 YOLOv8，暂未接入任何功能）
+
+`app/carapp/core/vision/` 是独立的检测模块：原生 Ultralytics YOLOv8 + PyTorch，有 CUDA 时用 `cuda:0`，没有则退回 CPU。它只做"图片进、目标出"，**不包含红绿灯、车道或障碍物的任何语义，也不参与停车判断**——红绿灯仍使用自己的 OpenVINO 检测器（`core/traffic_light_detector.py`），两者互不影响，任一侧故障都不会影响另一侧。
+
+配置在 `app/config/settings.json` 的 `vision` 段：
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `model` | `models/vision/yolov8n.pt` | 相对 `app/`；官方权重缺失时自动下载 |
+| `device` | `auto` | `cuda:0` / `cpu`；`auto` 有显卡就用显卡 |
+| `imgsz` | `640` | 推理输入尺寸 |
+| `confidence` | `0.25` | 置信度阈值 |
+| `tiles` / `tile_confidence` | 空 / 同 `confidence` | 需要放大检测时填归一化矩形 |
+| `merge_iou` | `0.45` | 跨块同类别框的合并阈值 |
+
+依赖都在 `app/requirements.txt` 里（含 torch / torchvision / ultralytics），装齐即可开箱使用；有 NVIDIA 显卡时按文件头的注释先装 CUDA 版 torch。`main.py` 启动时构建一个实例挂在 `app.vision`，日志打印 `视觉模块：YOLOv8 yolov8n.pt · auto · 640px`，当前没有功能订阅它。
+
+默认权重是 COCO 的 `yolov8n`（80 类，含 person/car/truck 等），**认不出沙盘里的模型建筑和树**，实测车端沙盘画面 0 检出；要用于沙盘需要自训权重。
 
 ## 路侧红绿灯广播（只读）
 

@@ -184,6 +184,22 @@ DEFAULTS = {
         # 新路线首段与当前车头最大夹角，超过就是"要求掉头"，直接判无路
         "avoid_max_turn_degrees": 75.,
     },
+    "vision": {
+        # 相对路径以 app/ 为基准；官方 yolov8n/s/m/l/x 权重缺失时会自动下载到
+        # models/vision/。换成自训权重时把这里指向 .pt 即可。
+        "model": "models/vision/yolov8n.pt",
+        # "auto" = 有 CUDA 用 cuda:0，否则退回 cpu；也可写死 "cuda:0" / "cpu"。
+        "device": "auto",
+        "imgsz": 640,
+        "confidence": .25,
+        # 需要放大检测时填归一化矩形（小目标在整帧缩放下会消失）；
+        # 空列表表示只做一次全帧推理。
+        "tiles": [],
+        "tile_confidence": None,
+        # 跨块同类别框的 IoU 合并阈值。
+        "merge_iou": .45,
+        "verbose": False,
+    },
     "traffic_light": {
         # 全帧之外再对七块区域裁切放大后推理：640x480 里一盏灯只有十几到
         # 三十像素，整帧缩到 320 后模型看不到，而模型对取景非常敏感——同一

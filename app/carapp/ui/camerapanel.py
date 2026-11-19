@@ -27,6 +27,27 @@ except Exception:
 from carapp.ui import theme
 
 
+def draw_vision_boxes(img, vision):
+    """Draw read-only detections onto ``img`` (source pixels -> image pixels).
+
+    Kept as a plain function so the overlay can be tested without a Tk window.
+    ``vision`` is ``{"objects": [VisionObject], "image_size": (w, h)}``.
+    """
+    draw = ImageDraw.Draw(img)
+    width, height = img.size
+    source_w, source_h = vision.get("image_size") or (width, height)
+    scale_x = width / float(source_w) if source_w else 1.
+    scale_y = height / float(source_h) if source_h else 1.
+    for item in vision.get("objects") or ():
+        x, y, box_w, box_h = item.box
+        x, y = x * scale_x, y * scale_y
+        box_w, box_h = box_w * scale_x, box_h * scale_y
+        draw.rectangle((x, y, x + box_w, y + box_h), outline="#ffb000", width=2)
+        draw.text((x + 3, max(0., y - 12)),
+                  "%s %.2f" % (item.label, item.score), fill="#ffb000")
+    return img
+
+
 class CameraPanel(tk.Frame):
     def __init__(self, parent, ctx, compact=True):
         super().__init__(parent, bg=theme.BG)
@@ -187,6 +208,13 @@ class CameraPanel(tk.Frame):
                     if cal:
                         draw.line((0,cal["y"]*h,w,cal["y"]*h),fill="#00ff66",width=2)
                         draw.line((cal["x"]*w,0,cal["x"]*w,h),fill="#00ff66",width=2)
+                # Read-only detection preview. Boxes come from the page's
+                # background worker, never from this draw path.
+                vision = st.get("vision_boxes")
+                if self.var_topic.get() == "/image_raw" and vision:
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    img = draw_vision_boxes(img, vision)
                 box = self._fit_box()
                 if box:
                     aw, ah = box
